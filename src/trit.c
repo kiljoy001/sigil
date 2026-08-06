@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 Scott J Guyton */
+
 /*
  * Balanced-ternary packing for the two trailing sigil bytes.
  *

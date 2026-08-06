@@ -110,6 +110,12 @@ Not yet built:
   most — all three collapsing into the same 32 bits. Swapping it changes no other
   code.
 
+## License
+
+GPLv3 or later. Copyleft rather than permissive for two reasons: a kernel module
+would need to be GPL regardless, and the design's value is in the layout idea, which
+is worth keeping open rather than letting it disappear into a closed product.
+
 ## A note on SHA-1
 
 SHA-1 is used here for content identity, not security. Collision resistance against a

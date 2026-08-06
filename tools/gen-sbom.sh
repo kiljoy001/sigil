@@ -38,8 +38,8 @@ emit_files() {
       "SPDXID": "SPDXRef-File$id",
       "fileName": "./$f",
       "checksums": [{ "algorithm": "SHA256", "checksumValue": "$sha" }],
-      "licenseConcluded": "NOASSERTION",
-      "copyrightText": "NOASSERTION"
+      "licenseConcluded": "GPL-3.0-or-later",
+      "copyrightText": "Copyright (c) 2026 Scott J Guyton"
     }
 EOF
 	done
@@ -63,9 +63,9 @@ cat <<EOF
       "versionInfo": "$version",
       "downloadLocation": "https://github.com/kiljoy001/sigil",
       "filesAnalyzed": false,
-      "licenseConcluded": "NOASSERTION",
-      "licenseDeclared": "NOASSERTION",
-      "copyrightText": "NOASSERTION",
+      "licenseConcluded": "GPL-3.0-or-later",
+      "licenseDeclared": "GPL-3.0-or-later",
+      "copyrightText": "Copyright (c) 2026 Scott J Guyton",
       "comment": "No third-party runtime dependencies. SHA-1 is implemented in-tree; there is no link-time dependency on a crypto library."
     }
   ],
