@@ -1,0 +1,18 @@
+# Build output
+*.o
+*.a
+test/differential
+test/bench
+
+# Generated
+sbom.spdx.json
+
+# Editor
+*.swp
+*~
+.#*
+
+# Debug
+core
+core.*
+*.dwo
