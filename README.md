@@ -55,6 +55,41 @@ over N records touches 4N bytes of LSH words instead of 32N bytes of whole recor
 8x less memory traffic on the binding constraint. Full records are reassembled only
 for the survivors of a filter.
 
+## The bits carry meaning
+
+The 32 LSH bits come from a sentence embedding, not a byte hash. Text goes through
+`all-MiniLM-L6-v2` (384-dim) and is projected to 32 bits by SimHash against fixed
+random hyperplanes. SimHash is the right reduction because the probability that two
+vectors fall on opposite sides of a random hyperplane is `theta/pi` — so Hamming
+distance in the compressed space is an unbiased estimator of angular distance in the
+original. Cosine similarity survives the squeeze.
+
+Measured on paraphrase pairs chosen to share almost no vocabulary, so that any signal
+must come from meaning rather than surface form:
+
+```
+paraphrases (should be close)        unrelated (should be far)
+  cat/feline              8            cat/earnings           14
+  earnings/revenue        8            crash/photography      17
+  crash/downtime          9            contract/feline        15
+  photography             8            revenue/photography    18
+  contract/agreement     12
+
+mean paraphrase distance: 9.0
+mean unrelated distance:  16.0
+separation:               7.0 bits
+```
+
+"the contract was terminated early" and "they ended the agreement ahead of schedule"
+land 12 bits apart with not one word in common. The distributions do not overlap, so
+a single Hamming threshold separates them at query time.
+
+`make check-semantic` asserts both the separation margin and the non-overlap. Run
+`./test/semantic` with no model and it uses the deliberately non-semantic hash
+backend, where separation collapses to 1.6 bits and the distributions overlap — the
+test fails, which is exactly its purpose. It is the regression guard that keeps a
+placeholder from quietly returning.
+
 ## Correctness
 
 Every SIMD kernel has a scalar twin, and `test/differential.c` runs both over random
@@ -80,20 +115,42 @@ all passed
 ## Build
 
 ```sh
-make          # libsigil.a
-make check    # differential tests
-make bench    # throughput
-make sbom     # SPDX 2.3 SBOM
+make                 # libsigil.a
+make check           # differential tests (scalar vs AVX2)
+make check-semantic  # proves the LSH bits are semantic
+make bench           # throughput
+make sbom            # SPDX 2.3 SBOM
 ```
 
-No third-party dependencies. SHA-1 is implemented in-tree specifically so the
-dependency list stays empty; the scalar kernels build on any platform, and AVX2 is
-detected at runtime via CPUID.
+The core library has no third-party dependencies: SHA-1 is implemented in-tree, the
+scalar kernels build anywhere, and AVX2 is detected at runtime via CPUID.
+
+Semantic embeddings need llama.cpp, which is detected at build time and optional. The
+library builds and links without it; `sigil_embedder_llama()` returns NULL and
+`make check-semantic` skips rather than silently passing against the fallback.
+
+```sh
+# Build llama.cpp, then convert an embedding model:
+python3 llama.cpp/convert_hf_to_gguf.py \
+    ~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/*/ \
+    --outfile ~/models/all-MiniLM-L6-v2-f16.gguf --outtype f16
+
+make check-semantic LLAMA_DIR=~/llama.cpp MODEL=~/models/all-MiniLM-L6-v2-f16.gguf
+```
+
+### A caveat on the hyperplane seed
+
+The projection is seeded (`SIMHASH_SEED`), and hyperplanes are generated
+deterministically with splitmix64 so two machines produce identical bits. But a
+store's bits are only comparable against the seed *and* embedding width that produced
+them. Changing either invalidates every sigil already written. This wants to be
+recorded in a store header before anything durable is built on it.
 
 ## Status
 
-Working: the 32-byte layout, trit packing, the struct-of-arrays store, and the three
-scan kernels with their scalar references and benchmarks.
+Working: the 32-byte layout, trit packing, the struct-of-arrays store, the three scan
+kernels with scalar references and benchmarks, and real semantic embeddings via
+llama.cpp with a test that proves they are semantic.
 
 Not yet built:
 
@@ -104,11 +161,12 @@ Not yet built:
   fidelity this does not need, and base 9P2000 talks to Linux v9fs, plan9port, and
   native Plan 9 alike. The Linux client is already in mainline, so no kernel module is
   required.
-- **Real LSH.** `compute_lsh()` in `src/sigil.c` is a byte-shingle sketch standing in
-  for the actual semantic embedding. The intended source is a progressive three-tier
-  pipeline — MinHash on everything, Word2Vec on what matters, BERT on what matters
-  most — all three collapsing into the same 32 bits. Swapping it changes no other
-  code.
+- **Persistence.** The store is in-memory. A durable format needs to record the
+  embedding model, its width, and the hyperplane seed, since bits made under different
+  parameters are not comparable.
+- **Tiered embedding.** One model runs on everything today. The cheaper design is
+  progressive — a fast sketch on all files, the transformer only on what matters —
+  since embedding is now the dominant cost per file, not the scan.
 
 ## License
 

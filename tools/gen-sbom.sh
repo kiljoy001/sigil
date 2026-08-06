@@ -25,8 +25,9 @@ cc_ver=$(${CC:-cc} --version 2>/dev/null | head -1 | tr -d '"\\' || echo "unknow
 # Hash every source file so the SBOM pins actual content, not just a version.
 emit_files() {
 	first=1
-	for f in include/sigil.h src/sigil.c src/trit.c src/store.c \
-	         src/scan_scalar.c src/scan_avx2.c; do
+	for f in include/sigil.h include/sigil_embed.h src/sigil.c src/trit.c \
+	         src/store.c src/scan_scalar.c src/scan_avx2.c src/simhash.c \
+	         src/embed_llama.c; do
 		[ -f "$f" ] || continue
 		sha=$(sha256sum "$f" | cut -d' ' -f1)
 		# SPDXIDs allow only letters, digits, '.' and '-'.
@@ -66,7 +67,29 @@ cat <<EOF
       "licenseConcluded": "GPL-3.0-or-later",
       "licenseDeclared": "GPL-3.0-or-later",
       "copyrightText": "Copyright (c) 2026 Scott J Guyton",
-      "comment": "No third-party runtime dependencies. SHA-1 is implemented in-tree; there is no link-time dependency on a crypto library."
+      "comment": "Core library has no third-party runtime dependencies: SHA-1 is implemented in-tree, with no link-time dependency on a crypto library. Semantic embedding is an optional backend requiring llama.cpp (see SPDXRef-Package-llama-cpp); without it the library builds and links, and sigil_embedder_llama() returns NULL."
+    },
+    {
+      "SPDXID": "SPDXRef-Package-llama-cpp",
+      "name": "llama.cpp",
+      "versionInfo": "NOASSERTION",
+      "downloadLocation": "https://github.com/ggml-org/llama.cpp",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright (c) 2023-2025 The ggml authors",
+      "comment": "OPTIONAL build-time and runtime dependency, enabled by SIGIL_WITH_LLAMA. Dynamically linked (libllama.so, libggml.so, libggml-base.so). Not vendored; not required to build the core library."
+    },
+    {
+      "SPDXID": "SPDXRef-Package-minilm",
+      "name": "all-MiniLM-L6-v2",
+      "versionInfo": "NOASSERTION",
+      "downloadLocation": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION",
+      "comment": "OPTIONAL model weights, not distributed with this source. Supplied by the user at runtime as a GGUF file and loaded by the llama.cpp backend. Recorded here because the LSH bits a store contains depend on which model produced them."
     }
   ],
   "files": [
@@ -77,6 +100,16 @@ $(emit_files)
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",
       "relatedSpdxElement": "SPDXRef-Package-sigil"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sigil",
+      "relationshipType": "OPTIONAL_DEPENDENCY_OF",
+      "relatedSpdxElement": "SPDXRef-Package-llama-cpp"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sigil",
+      "relationshipType": "OPTIONAL_DEPENDENCY_OF",
+      "relatedSpdxElement": "SPDXRef-Package-minilm"
     }
   ],
   "annotations": [
