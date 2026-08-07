@@ -26,7 +26,7 @@ cc_ver=$(${CC:-cc} --version 2>/dev/null | head -1 | tr -d '"\\' || echo "unknow
 emit_files() {
 	first=1
 	for f in include/sigil.h include/sigil_embed.h src/sigil.c src/trit.c \
-	         src/store.c src/scan_scalar.c src/scan_x86.c src/scan_neon.c src/scan_generic.c src/simhash.c \
+	         src/store.c src/scan_scalar.c src/scan_x86.c src/scan_sse.c src/scan_neon.c src/scan_generic.c src/simhash.c \
 	         src/embed_llama.c; do
 		[ -f "$f" ] || continue
 		sha=$(sha256sum "$f" | cut -d' ' -f1)

@@ -24,7 +24,16 @@
 
 #ifdef SIGIL_X86
 
-int sigil_have_simd(void)
+/*
+ * AVX2 is a runtime property, not a compile-time one: this file is built for
+ * generic x86-64 and the AVX2 bodies carry target attributes, so the binary
+ * runs on pre-2013 hardware that has none. Calling an AVX2 body there faults
+ * with SIGILL, so every entry point below has to check first.
+ *
+ * Probed once. __builtin_cpu_supports would also work, but CPUID here keeps
+ * the check identical to what sigil_have_simd() reports to callers.
+ */
+static int avx2_probe(void)
 {
 	unsigned eax, ebx, ecx, edx;
 
@@ -33,6 +42,50 @@ int sigil_have_simd(void)
 	__cpuid_count(7, 0, eax, ebx, ecx, edx);
 	return (ebx & bit_AVX2) != 0;
 }
+
+static int sse42_probe(void)
+{
+	unsigned eax, ebx, ecx, edx;
+
+	if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx))
+		return 0;
+	/* SSSE3 is needed for pshufb, SSE4.1 for pextrd, SSE4.2 nominally. */
+	return (ecx & bit_SSSE3) && (ecx & bit_SSE4_1) && (ecx & bit_SSE4_2);
+}
+
+static int have_avx2(void)
+{
+	static int cached = -1;
+
+	if (cached < 0)
+		cached = avx2_probe();
+	return cached;
+}
+
+static int have_sse42(void)
+{
+	static int cached = -1;
+
+	if (cached < 0)
+		cached = sse42_probe();
+	return cached;
+}
+
+int sigil_have_simd(void)
+{
+	return have_avx2() || have_sse42();
+}
+
+/* Implemented in scan_sse.c; declared here rather than in the public header
+ * because callers pick a path through the _simd entry points, not directly. */
+size_t sigil_scan_similar_sse(const sigil_store_t *st, const uint64_t *query,
+                              uint32_t max_distance,
+                              uint32_t *out, size_t max_out);
+size_t sigil_scan_timerange_sse(const sigil_store_t *st,
+                                uint32_t start, uint32_t end,
+                                uint32_t *out, size_t max_out);
+size_t sigil_scan_category_sse(const sigil_store_t *st, uint16_t category,
+                               uint32_t *out, size_t max_out);
 
 
 /*
@@ -50,7 +103,7 @@ int sigil_have_simd(void)
  * distance, and the halves are independent — no cross-lane shuffles.
  */
 __attribute__((target("avx2")))
-size_t sigil_scan_similar_simd(const sigil_store_t *st, const uint64_t *query,
+static size_t scan_similar_avx2(const sigil_store_t *st, const uint64_t *query,
                                uint32_t max_distance,
                                uint32_t *out, size_t max_out)
 {
@@ -94,7 +147,7 @@ size_t sigil_scan_similar_simd(const sigil_store_t *st, const uint64_t *query,
 }
 
 __attribute__((target("avx2")))
-size_t sigil_scan_timerange_simd(const sigil_store_t *st,
+static size_t scan_timerange_avx2(const sigil_store_t *st,
                                  uint32_t start, uint32_t end,
                                  uint32_t *out, size_t max_out)
 {
@@ -131,7 +184,7 @@ size_t sigil_scan_timerange_simd(const sigil_store_t *st,
 }
 
 __attribute__((target("avx2")))
-size_t sigil_scan_category_simd(const sigil_store_t *st, uint16_t category,
+static size_t scan_category_avx2(const sigil_store_t *st, uint16_t category,
                                 uint32_t *out, size_t max_out)
 {
 	size_t n = 0, i = 0;
@@ -157,6 +210,48 @@ size_t sigil_scan_category_simd(const sigil_store_t *st, uint16_t category,
 			out[n++] = (uint32_t)i;
 	}
 	return n;
+}
+
+/* ---------------------------------------------------------------------------
+ * Dispatch
+ *
+ * AVX2, else SSE4.2, else scalar. Both probes are cached, and the scan loops
+ * run for millions of records, so the branches at entry cost nothing
+ * measurable. Dispatch has to be at runtime because this file is built for
+ * generic x86-64: the vector bodies carry target attributes, so the binary
+ * loads on a 2010 Xeon that would SIGILL on the AVX2 path.
+ * ------------------------------------------------------------------------ */
+
+size_t sigil_scan_similar_simd(const sigil_store_t *st, const uint64_t *query,
+                               uint32_t max_distance,
+                               uint32_t *out, size_t max_out)
+{
+	if (have_avx2())
+		return scan_similar_avx2(st, query, max_distance, out, max_out);
+	if (have_sse42())
+		return sigil_scan_similar_sse(st, query, max_distance, out, max_out);
+	return sigil_scan_similar_scalar(st, query, max_distance, out, max_out);
+}
+
+size_t sigil_scan_timerange_simd(const sigil_store_t *st,
+                                 uint32_t start, uint32_t end,
+                                 uint32_t *out, size_t max_out)
+{
+	if (have_avx2())
+		return scan_timerange_avx2(st, start, end, out, max_out);
+	if (have_sse42())
+		return sigil_scan_timerange_sse(st, start, end, out, max_out);
+	return sigil_scan_timerange_scalar(st, start, end, out, max_out);
+}
+
+size_t sigil_scan_category_simd(const sigil_store_t *st, uint16_t category,
+                                uint32_t *out, size_t max_out)
+{
+	if (have_avx2())
+		return scan_category_avx2(st, category, out, max_out);
+	if (have_sse42())
+		return sigil_scan_category_sse(st, category, out, max_out);
+	return sigil_scan_category_scalar(st, category, out, max_out);
 }
 
 #endif /* SIGIL_X86 */

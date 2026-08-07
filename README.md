@@ -67,6 +67,24 @@ That second penalty is why `timerange` initially ran *slower* than scalar on ARM
 A wider-register ARM core (SVE2) would likely close the gap, but the Cortex-A76 has
 NEON only.
 
+And on pre-AVX2 x86 (Xeon E5645, Westmere, 2010):
+
+| kernel             |     ms | GB/s  |
+|--------------------|-------:|------:|
+| similarity scalar  | 101.91 |  1.6  |
+| similarity SSE4.2  |  48.90 |  3.3  |
+
+2.08x, the best relative gain of the three targets. An XMM register is 128 bits —
+exactly one LSH code, same as NEON — but unlike NEON, SSE has `movemask`, so the
+lane-selecting kernels keep results in a register instead of round-tripping through
+memory. That is worth more here than NEON's native popcount is there.
+
+Dispatch is AVX2, else SSE4.2, else scalar, chosen at runtime from cached CPUID
+probes. The vector bodies carry target attributes and the object is built for generic
+x86-64, so one binary runs everywhere — but that means the check is mandatory:
+calling an AVX2 body on a 2010 Xeon faults with SIGILL. An earlier version had the
+probe and did not branch on it, and crashed on exactly that hardware.
+
 Reproduce with `make bench`, or `./test/bench 100000000` for a larger run.
 
 ### On the numbers this replaces
