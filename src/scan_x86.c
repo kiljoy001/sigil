@@ -96,6 +96,10 @@ size_t sigil_scan_category_sse(const sigil_store_t *st, uint16_t category,
  * better fit than the old 32-bit layout, which needed maddubs/madd folding to
  * keep per-record totals from bleeding across lanes.
  *
+ * Loads are unaligned (loadu). A ranged view can start at any index, so the
+ * base pointer is not guaranteed 32-byte aligned; on modern x86 loadu on
+ * aligned data costs nothing anyway.
+ *
  * vpsadbw does the work: it sums absolute byte differences into four u64
  * fields, one per 64-bit group. Against a zeroed operand that is just a byte
  * sum, so after the nibble-LUT popcount each u64 lane holds the bit count for
@@ -119,7 +123,7 @@ static size_t scan_similar_avx2(const sigil_store_t *st, const uint64_t *query,
 
 	/* Two records per iteration. */
 	for (; i + 2 <= st->count && n + 2 <= max_out; i += 2) {
-		__m256i v = _mm256_load_si256(
+		__m256i v = _mm256_loadu_si256(
 			(const __m256i *)(st->lsh + i * SIGIL_LSH_WORDS));
 		__m256i x = _mm256_xor_si256(v, q);
 		__m256i lo = _mm256_and_si256(x, mask);
@@ -159,7 +163,7 @@ static size_t scan_timerange_avx2(const sigil_store_t *st,
 	const __m256i hi   = _mm256_set1_epi32((int)(end   ^ 0x80000000u));
 
 	for (; i + 8 <= st->count && n + 8 <= max_out; i += 8) {
-		__m256i v = _mm256_load_si256((const __m256i *)(st->timestamp + i));
+		__m256i v = _mm256_loadu_si256((const __m256i *)(st->timestamp + i));
 		__m256i b = _mm256_xor_si256(v, bias);
 		/* in range <=> !(b < lo) && !(b > hi) */
 		__m256i too_low  = _mm256_cmpgt_epi32(lo, b);
@@ -192,7 +196,7 @@ static size_t scan_category_avx2(const sigil_store_t *st, uint16_t category,
 
 	/* 16 categories per register. */
 	for (; i + 16 <= st->count && n + 16 <= max_out; i += 16) {
-		__m256i v  = _mm256_load_si256((const __m256i *)(st->category + i));
+		__m256i v  = _mm256_loadu_si256((const __m256i *)(st->category + i));
 		__m256i eq = _mm256_cmpeq_epi16(v, q);
 		/* movemask_epi8 gives two bits per 16-bit lane; both are set or
 		 * both clear, so test every other bit. */

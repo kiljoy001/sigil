@@ -35,7 +35,8 @@
 #ifdef SIGIL_SSE
 
 /*
- * One record per iteration: 128 bits is one XMM register.
+ * One record per iteration: 128 bits is one XMM register. Loads are unaligned
+ * because ranged views can start at any index.
  *
  * psadbw against zero sums the byte counts into two 64-bit fields, and the
  * record's distance is the sum of those two. Unlike AVX2 there are no 128-bit
@@ -54,7 +55,7 @@ size_t sigil_scan_similar_sse(const sigil_store_t *st, const uint64_t *query,
 	const __m128i q = _mm_loadu_si128((const __m128i *)query);
 
 	for (; i < st->count && n < max_out; i++) {
-		__m128i v = _mm_load_si128(
+		__m128i v = _mm_loadu_si128(
 			(const __m128i *)(st->lsh + i * SIGIL_LSH_WORDS));
 		__m128i x = _mm_xor_si128(v, q);
 		__m128i lo = _mm_and_si128(x, mask);
@@ -85,7 +86,7 @@ size_t sigil_scan_timerange_sse(const sigil_store_t *st,
 	const __m128i hi   = _mm_set1_epi32((int)(end   ^ 0x80000000u));
 
 	for (; i + 4 <= st->count && n + 4 <= max_out; i += 4) {
-		__m128i v = _mm_load_si128((const __m128i *)(st->timestamp + i));
+		__m128i v = _mm_loadu_si128((const __m128i *)(st->timestamp + i));
 		__m128i b = _mm_xor_si128(v, bias);
 		__m128i too_low  = _mm_cmplt_epi32(b, lo);
 		__m128i too_high = _mm_cmpgt_epi32(b, hi);
@@ -119,7 +120,7 @@ size_t sigil_scan_category_sse(const sigil_store_t *st, uint16_t category,
 	const __m128i q = _mm_set1_epi16((short)category);
 
 	for (; i + 8 <= st->count && n + 8 <= max_out; i += 8) {
-		__m128i v  = _mm_load_si128((const __m128i *)(st->category + i));
+		__m128i v  = _mm_loadu_si128((const __m128i *)(st->category + i));
 		__m128i eq = _mm_cmpeq_epi16(v, q);
 		/* movemask_epi8 gives two bits per 16-bit lane; both set or both
 		 * clear, so step by pairs. */

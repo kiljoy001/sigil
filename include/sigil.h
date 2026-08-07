@@ -206,6 +206,35 @@ size_t sigil_scan_category_scalar(const sigil_store_t *st, uint16_t category,
 size_t sigil_scan_category_simd(const sigil_store_t *st, uint16_t category,
                                 uint32_t *out, size_t max_out);
 
+/* ---------------------------------------------------------------------------
+ * Ranged scans
+ *
+ * Same kernels restricted to [lo, hi). The scan is embarrassingly parallel —
+ * each range reads a contiguous, disjoint slice of the SoA arrays with no
+ * shared state — so a caller can split the store across threads and merge the
+ * index lists afterwards.
+ *
+ * Returned indices are absolute, not range-relative, so merged results need no
+ * fixup. Whether threading helps depends on the machine: the scan is
+ * bandwidth-bound, so a core already near its memory ceiling gains little,
+ * while a wide box with spare controllers gains a lot.
+ *
+ * libsigil stays single-threaded and dependency-free; threading is the
+ * caller's to own. See test/bench_mt.c for both a thread-per-range and a
+ * work-pool implementation over these.
+ * ------------------------------------------------------------------------ */
+
+size_t sigil_scan_similar_range(const sigil_store_t *st, const uint64_t *query,
+                                uint32_t max_distance, size_t lo, size_t hi,
+                                uint32_t *out, size_t max_out);
+size_t sigil_scan_timerange_range(const sigil_store_t *st,
+                                  uint32_t start, uint32_t end,
+                                  size_t lo, size_t hi,
+                                  uint32_t *out, size_t max_out);
+size_t sigil_scan_category_range(const sigil_store_t *st, uint16_t category,
+                                 size_t lo, size_t hi,
+                                 uint32_t *out, size_t max_out);
+
 /* Nonzero if the _simd kernels use real vector instructions on this build:
  * AVX2 (probed via CPUID) on x86-64, NEON (architectural baseline) on
  * aarch64, zero where they forward to the scalar reference. */

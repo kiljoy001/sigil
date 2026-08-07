@@ -21,16 +21,16 @@ endif
 MODEL ?= $(HOME)/models/all-MiniLM-L6-v2-f16.gguf
 
 SRC  = src/sigil.c src/trit.c src/store.c src/scan_scalar.c \
-       src/scan_x86.c src/scan_sse.c src/scan_neon.c src/scan_generic.c \
+       src/scan_x86.c src/scan_sse.c src/scan_neon.c src/scan_generic.c src/scan_range.c \
        src/simhash.c src/embed_llama.c
 OBJ  = $(SRC:.c=.o)
 LIB  = libsigil.a
 
-TESTS = test/differential test/bench test/semantic test/eval
+TESTS = test/differential test/bench test/bench_mt test/semantic test/eval
 
 CORPUS ?= test/data/corpus.txt
 
-.PHONY: all check check-semantic eval corpus bench clean sbom
+.PHONY: all check check-semantic eval corpus bench bench-mt clean sbom
 
 all: $(LIB)
 
@@ -45,6 +45,11 @@ test/differential: test/differential.c $(LIB)
 
 test/bench: test/bench.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) -o $@ $(LDFLAGS) $(LDLIBS)
+
+# Threading lives in the benchmark, not the library: libsigil stays
+# single-threaded and free of a pthreads dependency.
+test/bench_mt: test/bench_mt.c $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) -o $@ $(LDFLAGS) $(LDLIBS) -lpthread
 
 test/semantic: test/semantic.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) -o $@ $(LDFLAGS) $(LLAMA_LDFLAGS) $(LDLIBS)
@@ -89,6 +94,9 @@ corpus:
 
 bench: test/bench
 	./test/bench
+
+bench-mt: test/bench_mt
+	./test/bench_mt
 
 sbom:
 	./tools/gen-sbom.sh > sbom.spdx.json

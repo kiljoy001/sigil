@@ -85,7 +85,37 @@ x86-64, so one binary runs everywhere — but that means the check is mandatory:
 calling an AVX2 body on a 2010 Xeon faults with SIGILL. An earlier version had the
 probe and did not branch on it, and crashed on exactly that hardware.
 
-Reproduce with `make bench`, or `./test/bench 100000000` for a larger run.
+### Threading
+
+The scan is embarrassingly parallel: `sigil_scan_*_range()` restricts a scan to
+`[lo, hi)` and returns absolute indices, so a caller can split the store across
+threads and concatenate results. libsigil itself stays single-threaded and free of
+a pthreads dependency — a server with request-level concurrency does not want a
+nested pool fighting it.
+
+Similarity scan, 10M records, `make bench-mt`:
+
+| machine | 1 thread | static split | work pool |
+|---|---|---|---|
+| 2x Xeon E5645 (12 cores) | 49.11 ms | 9.45 ms | **7.11 ms** (6.91x) |
+| i5-12600K | 12.43 ms | 2.70 ms | **2.15 ms** (5.77x) |
+| RK3588 | 36.27 ms | 12.55 ms | **7.88 ms** (4.61x) |
+
+A work pool beats a static split on every machine, because all three have
+heterogeneous cores — two sockets with interleaved memory, P-cores and E-cores, or
+big.LITTLE. Static splitting waits on the slowest core; the pool lets fast cores take
+more chunks. Speedup stops where the memory controllers saturate, not where cores run
+out.
+
+### GPU
+
+`bench/scan_opencl.c` is a measurement, not a backend — nothing in libsigil links
+OpenCL. On an Arc Pro B50 at 100M records the kernel runs in **7.22 ms at 222 GB/s**,
+2.9x the fastest CPU configuration, but only if the store is already resident: the
+PCIe upload is 315 ms, 43x the kernel time. A one-shot scan loses badly; a long-lived
+node amortizes it away.
+
+Reproduce with `make bench`, `make bench-mt`, or `./test/bench 100000000`.
 
 ### On the numbers this replaces
 
@@ -227,11 +257,22 @@ Not yet built:
 - **Persistence.** The store is in-memory. A durable format needs to record the
   embedding model, its width, and the hyperplane seed, since bits made under different
   parameters are not comparable.
+- **GPU offload.** `bench/scan_opencl.c` shows a resident store scanning 2.9x faster
+  than the best CPU path. Turning that into a backend needs residency management —
+  incremental appends without re-uploading — not just the kernel, which already
+  exists.
 - **Tiered embedding.** One model runs on everything today, at ~470 docs/s. The
   cheaper design is progressive — a fast sketch on all files, the transformer only on
   what matters — since embedding now dominates per-file cost by roughly 60x over
   hashing. INT8 quantization is quality-neutral here (0.7880 vs 0.7880 measured), so
   NPU or GPU inference costs nothing in retrieval quality.
+
+## Findings
+
+`docs/FINDINGS.md` records what was measured and what did not work: seven embedding
+models, three projections, whitening, Matryoshka truncation, NPU and GPU offload for
+both embedding and scanning, and the concurrency results that changed several
+conclusions. Most of it is negative results, which are the ones worth writing down.
 
 ## License
 
