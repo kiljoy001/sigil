@@ -25,9 +25,11 @@ SRC  = src/sigil.c src/trit.c src/store.c src/scan_scalar.c src/scan_avx2.c \
 OBJ  = $(SRC:.c=.o)
 LIB  = libsigil.a
 
-TESTS = test/differential test/bench test/semantic
+TESTS = test/differential test/bench test/semantic test/eval
 
-.PHONY: all check check-semantic bench clean sbom
+CORPUS ?= test/data/corpus.txt
+
+.PHONY: all check check-semantic eval corpus bench clean sbom
 
 all: $(LIB)
 
@@ -44,6 +46,9 @@ test/bench: test/bench.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) -o $@ $(LDFLAGS) $(LDLIBS)
 
 test/semantic: test/semantic.c $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) -o $@ $(LDFLAGS) $(LLAMA_LDFLAGS) $(LDLIBS)
+
+test/eval: test/eval.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) -o $@ $(LDFLAGS) $(LLAMA_LDFLAGS) $(LDLIBS)
 
 check: test/differential
@@ -64,6 +69,22 @@ else
 	@echo "  set LLAMA_DIR=/path/to/llama.cpp"
 	@exit 1
 endif
+
+# Retrieval quality on a standard corpus. Needs tools/fetch-corpus.py run first.
+eval: test/eval
+	@if [ ! -f "$(CORPUS)" ]; then \
+		echo "no corpus at $(CORPUS) — fetch one first:"; \
+		echo "  python3 -m venv ~/.sigil-eval"; \
+		echo "  ~/.sigil-eval/bin/pip install datasets"; \
+		echo "  ~/.sigil-eval/bin/python tools/fetch-corpus.py"; \
+		exit 1; \
+	fi
+	./test/eval "$(MODEL)" "$(CORPUS)"
+
+corpus:
+	@echo "python3 -m venv ~/.sigil-eval && \\"
+	@echo "  ~/.sigil-eval/bin/pip install datasets && \\"
+	@echo "  ~/.sigil-eval/bin/python tools/fetch-corpus.py"
 
 bench: test/bench
 	./test/bench

@@ -16,3 +16,7 @@ sbom.spdx.json
 core
 core.*
 *.dwo
+
+# Fetched evaluation corpus (reproduce with tools/fetch-corpus.py)
+test/data/corpus.txt
+test/data/pairs.json
