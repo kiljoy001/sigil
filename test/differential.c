@@ -2,7 +2,7 @@
 /* Copyright (c) 2026 Scott J Guyton */
 
 /*
- * Differential tests: scalar vs AVX2.
+ * Differential tests: scalar vs SIMD (AVX2 on x86-64, NEON on aarch64).
  *
  * A wrong SIMD kernel does not crash. It returns a slightly wrong Hamming
  * distance, which surfaces as a slightly wrong similarity result that looks
@@ -31,11 +31,11 @@ static uint32_t rnd(void)
 static int failures;
 
 static void check(const char *what, size_t n_scalar, const uint32_t *a,
-                  size_t n_avx2, const uint32_t *b)
+                  size_t n_simd, const uint32_t *b)
 {
-	if (n_scalar != n_avx2) {
-		printf("  FAIL %s: scalar found %zu, avx2 found %zu\n",
-		       what, n_scalar, n_avx2);
+	if (n_scalar != n_simd) {
+		printf("  FAIL %s: scalar found %zu, simd found %zu\n",
+		       what, n_scalar, n_simd);
 		failures++;
 		return;
 	}
@@ -96,7 +96,7 @@ static void run_case(size_t count)
 		for (int j = 0; j < SIGIL_LSH_WORDS; j++)
 			q[j] = ((uint64_t)rnd() << 32) | rnd();
 		a = sigil_scan_similar_scalar(&st, q, d, out_s, count + 1);
-		b = sigil_scan_similar_avx2(&st, q, d, out_v, count + 1);
+		b = sigil_scan_similar_simd(&st, q, d, out_v, count + 1);
 
 		check("similar", a, out_s, b, out_v);
 	}
@@ -114,7 +114,7 @@ static void run_case(size_t count)
 		for (size_t r = 0; r < sizeof(ranges) / sizeof(ranges[0]); r++) {
 			size_t a = sigil_scan_timerange_scalar(&st, ranges[r].lo,
 			                ranges[r].hi, out_s, count + 1);
-			size_t b = sigil_scan_timerange_avx2(&st, ranges[r].lo,
+			size_t b = sigil_scan_timerange_simd(&st, ranges[r].lo,
 			                ranges[r].hi, out_v, count + 1);
 
 			check("timerange", a, out_s, b, out_v);
@@ -124,13 +124,13 @@ static void run_case(size_t count)
 	/* Categories, including one guaranteed absent. */
 	for (uint16_t c = 0; c < 8; c++) {
 		size_t a = sigil_scan_category_scalar(&st, c, out_s, count + 1);
-		size_t b = sigil_scan_category_avx2(&st, c, out_v, count + 1);
+		size_t b = sigil_scan_category_simd(&st, c, out_v, count + 1);
 
 		check("category", a, out_s, b, out_v);
 	}
 	{
 		size_t a = sigil_scan_category_scalar(&st, 0xffff, out_s, count + 1);
-		size_t b = sigil_scan_category_avx2(&st, 0xffff, out_v, count + 1);
+		size_t b = sigil_scan_category_simd(&st, 0xffff, out_v, count + 1);
 
 		check("category-absent", a, out_s, b, out_v);
 	}
@@ -180,8 +180,8 @@ int main(void)
 		100, 1000, 4096, 10000
 	};
 
-	printf("sigil differential tests (AVX2 %s)\n",
-	       sigil_have_avx2() ? "available" : "NOT available — comparing scalar to itself");
+	printf("sigil differential tests (SIMD %s)\n",
+	       sigil_have_simd() ? "active" : "INACTIVE — comparing scalar to itself");
 	printf("sizeof(sigil_t) = %zu, LSH %d bits\n",
 	       sizeof(sigil_t), SIGIL_LSH_BITS);
 

@@ -55,7 +55,8 @@ extern "C" {
  * array-of-structs design this code does not use.
  *
  * 128 bits also happens to be the common SIMD register width: one NEON
- * register exactly, two AVX2 lanes with no cross-lane fixups. See scan_avx2.c.
+ * register exactly, two AVX2 lanes with no cross-lane fixups. See scan_x86.c
+ * and scan_neon.c.
  * ------------------------------------------------------------------------ */
 
 #define SIGIL_HASH_LEN 20
@@ -146,7 +147,8 @@ int sigil_from_hex(const char *hex, sigil_t *out);
  * bytes of whole sigils — an 8x reduction in memory traffic, which is the
  * binding constraint. Full records are reassembled only for survivors.
  *
- * Field arrays are 32-byte aligned so AVX2 loads stay aligned.
+ * Field arrays are 32-byte aligned so vector loads stay aligned on both
+ * AVX2 (32-byte) and NEON (16-byte).
  * ------------------------------------------------------------------------ */
 
 typedef struct {
@@ -171,8 +173,9 @@ int sigil_store_get(const sigil_store_t *st, size_t i, sigil_t *out);
 /* ---------------------------------------------------------------------------
  * Scan kernels
  *
- * Each kernel has a scalar reference and an AVX2 implementation that must
- * agree bit-for-bit; test/differential.c enforces this over random input.
+ * Each kernel has a scalar reference and a SIMD implementation (AVX2 on
+ * x86-64, NEON on aarch64) that must agree with it bit-for-bit;
+ * test/differential.c enforces this over random input.
  * SIMD bugs here do not crash, they return subtly wrong distances that look
  * plausible forever, so the scalar twin is the only real check.
  *
@@ -185,7 +188,7 @@ int sigil_store_get(const sigil_store_t *st, size_t i, sigil_t *out);
 size_t sigil_scan_similar_scalar(const sigil_store_t *st, const uint64_t *query,
                                  uint32_t max_distance,
                                  uint32_t *out, size_t max_out);
-size_t sigil_scan_similar_avx2(const sigil_store_t *st, const uint64_t *query,
+size_t sigil_scan_similar_simd(const sigil_store_t *st, const uint64_t *query,
                                uint32_t max_distance,
                                uint32_t *out, size_t max_out);
 
@@ -193,18 +196,20 @@ size_t sigil_scan_similar_avx2(const sigil_store_t *st, const uint64_t *query,
 size_t sigil_scan_timerange_scalar(const sigil_store_t *st,
                                    uint32_t start, uint32_t end,
                                    uint32_t *out, size_t max_out);
-size_t sigil_scan_timerange_avx2(const sigil_store_t *st,
+size_t sigil_scan_timerange_simd(const sigil_store_t *st,
                                  uint32_t start, uint32_t end,
                                  uint32_t *out, size_t max_out);
 
 /* Indices where category[i] == category. */
 size_t sigil_scan_category_scalar(const sigil_store_t *st, uint16_t category,
                                   uint32_t *out, size_t max_out);
-size_t sigil_scan_category_avx2(const sigil_store_t *st, uint16_t category,
+size_t sigil_scan_category_simd(const sigil_store_t *st, uint16_t category,
                                 uint32_t *out, size_t max_out);
 
-/* Runtime dispatch: AVX2 where available, scalar otherwise. */
-int sigil_have_avx2(void);
+/* Nonzero if the _simd kernels use real vector instructions on this build:
+ * AVX2 (probed via CPUID) on x86-64, NEON (architectural baseline) on
+ * aarch64, zero where they forward to the scalar reference. */
+int sigil_have_simd(void);
 
 /* Hamming distance between two LSH codes, each SIGIL_LSH_WORDS words. */
 static inline uint32_t sigil_hamming(const uint64_t *a, const uint64_t *b)

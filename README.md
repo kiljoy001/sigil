@@ -37,15 +37,35 @@ was being used to reject exactly the widening that turned out to matter most.
 
 | kernel            |    ms | GB/s  |
 |-------------------|------:|------:|
-| similarity scalar | 21.95 |  7.3  |
-| similarity AVX2   | 10.09 | 15.9  |
+| similarity scalar | 22.98 |  7.0  |
+| similarity AVX2   | 10.48 | 15.3  |
 
 The similarity kernel scans every record. The scan is bandwidth-bound, not ALU-bound,
 which is the point of the layout.
 
-The same source builds and passes on aarch64 (RK3588, Cortex-A76/A55) using the
-scalar path: 26.85 ms for the same work. NEON kernels are not written yet, so that
-number is the floor rather than the ceiling.
+Same source, same test, on aarch64 (RK3588, Cortex-A76):
+
+| kernel            |    ms | GB/s  |
+|-------------------|------:|------:|
+| similarity scalar | 26.83 |  6.0  |
+| similarity NEON   | 18.09 |  8.9  |
+
+**NEON is simpler but slower.** A NEON register is 128 bits — exactly one LSH code,
+no lane bookkeeping — and aarch64 has `vcntq_u8`, a real per-byte popcount, where
+AVX2 has to emulate one with a nibble table and `vpshufb`. The inner loop is three
+instructions against roughly six.
+
+It still only reaches 1.48x over scalar where AVX2 reaches 2.2x, and x86 finishes the
+same work in 10.48 ms against 18.09. The reasons are structural: AVX2's 256-bit
+register takes two records per iteration to NEON's one, and aarch64 has no movemask,
+so lane-selecting kernels round-trip through memory instead of extracting a bitmask.
+That second penalty is why `timerange` initially ran *slower* than scalar on ARM
+(18.08 ms vs 10.87) until a `vmaxvq` early-out was added to skip empty blocks — now
+4.66 ms. Unrolling similarity to four chains was also tried and came out slower
+(19.77 ms); the loop is memory-bound, so extra in-flight work only costs registers.
+
+A wider-register ARM core (SVE2) would likely close the gap, but the Cortex-A76 has
+NEON only.
 
 Reproduce with `make bench`, or `./test/bench 100000000` for a larger run.
 
@@ -126,7 +146,7 @@ mean nothing and would silently decode corruption as valid data.
 
 ```
 $ make check
-sigil differential tests (AVX2 available)
+sigil differential tests (SIMD active)
 sizeof(sigil_t) = 48, LSH 128 bits
   ok   trits: all 729 values round-trip, 64807 corrupt values rejected
   ok   scan: n=0 ... n=10000
@@ -137,15 +157,17 @@ all passed
 
 ```sh
 make                 # libsigil.a
-make check           # differential tests (scalar vs AVX2)
+make check           # differential tests (scalar vs SIMD)
 make check-semantic  # proves the LSH bits are semantic
 make eval            # retrieval quality on a standard corpus
 make bench           # throughput
 make sbom            # SPDX 2.3 SBOM
 ```
 
-The core library has no third-party dependencies: SHA-1 is implemented in-tree, the
-scalar kernels build anywhere, and AVX2 is detected at runtime via CPUID.
+The core library has no third-party dependencies: SHA-1 is implemented in-tree and
+the scalar kernels build anywhere. AVX2 is selected at compile time and probed at
+runtime via CPUID; NEON is the aarch64 baseline so it needs no probe; anything else
+falls back to scalar with `sigil_have_simd()` reporting zero.
 
 Semantic embeddings need llama.cpp, which is detected at build time and optional. The
 library builds and links without it; `sigil_embedder_llama()` returns NULL and
@@ -171,9 +193,9 @@ recorded in a store header before anything durable is built on it.
 ## Status
 
 Working: the 48-byte layout with 128-bit LSH, trit packing, the struct-of-arrays
-store, the three scan kernels with scalar references and benchmarks, real semantic
-embeddings via llama.cpp, and retrieval evaluation against a standard corpus. Builds
-and passes on x86-64 and aarch64.
+store, the three scan kernels in scalar, AVX2, and NEON with differential tests
+proving they agree, real semantic embeddings via llama.cpp, and retrieval evaluation
+against a standard corpus. Builds and passes on x86-64 and aarch64.
 
 Not yet built:
 
@@ -187,10 +209,6 @@ Not yet built:
 - **Persistence.** The store is in-memory. A durable format needs to record the
   embedding model, its width, and the hyperplane seed, since bits made under different
   parameters are not comparable.
-- **NEON kernels.** aarch64 runs the scalar path today, 26.85 ms against x86's 10.09.
-  NEON is 128-bit, so one register holds exactly one LSH code, and ARM has a native
-  `vcntq_u8` popcount where AVX2 needs a nibble-table shuffle — the NEON kernel should
-  end up simpler than the x86 one.
 - **Tiered embedding.** One model runs on everything today, at ~470 docs/s. The
   cheaper design is progressive — a fast sketch on all files, the transformer only on
   what matters — since embedding now dominates per-file cost by roughly 60x over

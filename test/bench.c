@@ -47,8 +47,8 @@ int main(int argc, char **argv)
 	size_t found;
 	const int reps = 5;
 
-	printf("sigil benchmark — AVX2 %s, n=%zu\n",
-	       sigil_have_avx2() ? "on" : "off", count);
+	printf("sigil benchmark — SIMD %s, n=%zu\n",
+	       sigil_have_simd() ? "on" : "off", count);
 
 	if (sigil_store_init(&st, count) != 0) {
 		fprintf(stderr, "alloc failed for %zu records (%.1f GB)\n",
@@ -103,22 +103,22 @@ int main(int argc, char **argv)
 	BENCH("similar scalar",
 	      sigil_scan_similar_scalar(&st, qry, 40, out, 65536),
 	      count * SIGIL_LSH_WORDS * sizeof(uint64_t));
-	BENCH("similar avx2",
-	      sigil_scan_similar_avx2(&st, qry, 40, out, 65536),
+	BENCH("similar simd",
+	      sigil_scan_similar_simd(&st, qry, 40, out, 65536),
 	      count * SIGIL_LSH_WORDS * sizeof(uint64_t));
 
 	BENCH("timerange scalar",
 	      sigil_scan_timerange_scalar(&st, 0, 0x01000000u, out, 65536),
 	      count * sizeof(uint32_t));
-	BENCH("timerange avx2",
-	      sigil_scan_timerange_avx2(&st, 0, 0x01000000u, out, 65536),
+	BENCH("timerange simd",
+	      sigil_scan_timerange_simd(&st, 0, 0x01000000u, out, 65536),
 	      count * sizeof(uint32_t));
 
 	BENCH("category scalar",
 	      sigil_scan_category_scalar(&st, 42, out, 65536),
 	      count * sizeof(uint16_t));
-	BENCH("category avx2",
-	      sigil_scan_category_avx2(&st, 42, out, 65536),
+	BENCH("category simd",
+	      sigil_scan_category_simd(&st, 42, out, 65536),
 	      count * sizeof(uint16_t));
 
 	printf("\nnotes:\n");

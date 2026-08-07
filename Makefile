@@ -20,7 +20,8 @@ endif
 # Default model for the semantic test.
 MODEL ?= $(HOME)/models/all-MiniLM-L6-v2-f16.gguf
 
-SRC  = src/sigil.c src/trit.c src/store.c src/scan_scalar.c src/scan_avx2.c \
+SRC  = src/sigil.c src/trit.c src/store.c src/scan_scalar.c \
+       src/scan_x86.c src/scan_neon.c src/scan_generic.c \
        src/simhash.c src/embed_llama.c
 OBJ  = $(SRC:.c=.o)
 LIB  = libsigil.a

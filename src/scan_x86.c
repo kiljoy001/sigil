@@ -17,26 +17,22 @@
 #include "sigil.h"
 
 #if defined(__x86_64__) || defined(_M_X64)
+#define SIGIL_X86 1
 #include <immintrin.h>
 #include <cpuid.h>
-#define SIGIL_X86 1
 #endif
 
-int sigil_have_avx2(void)
-{
 #ifdef SIGIL_X86
+
+int sigil_have_simd(void)
+{
 	unsigned eax, ebx, ecx, edx;
 
 	if (__get_cpuid_max(0, NULL) < 7)
 		return 0;
 	__cpuid_count(7, 0, eax, ebx, ecx, edx);
 	return (ebx & bit_AVX2) != 0;
-#else
-	return 0;
-#endif
 }
-
-#ifdef SIGIL_X86
 
 
 /*
@@ -54,7 +50,7 @@ int sigil_have_avx2(void)
  * distance, and the halves are independent — no cross-lane shuffles.
  */
 __attribute__((target("avx2")))
-size_t sigil_scan_similar_avx2(const sigil_store_t *st, const uint64_t *query,
+size_t sigil_scan_similar_simd(const sigil_store_t *st, const uint64_t *query,
                                uint32_t max_distance,
                                uint32_t *out, size_t max_out)
 {
@@ -98,7 +94,7 @@ size_t sigil_scan_similar_avx2(const sigil_store_t *st, const uint64_t *query,
 }
 
 __attribute__((target("avx2")))
-size_t sigil_scan_timerange_avx2(const sigil_store_t *st,
+size_t sigil_scan_timerange_simd(const sigil_store_t *st,
                                  uint32_t start, uint32_t end,
                                  uint32_t *out, size_t max_out)
 {
@@ -135,7 +131,7 @@ size_t sigil_scan_timerange_avx2(const sigil_store_t *st,
 }
 
 __attribute__((target("avx2")))
-size_t sigil_scan_category_avx2(const sigil_store_t *st, uint16_t category,
+size_t sigil_scan_category_simd(const sigil_store_t *st, uint16_t category,
                                 uint32_t *out, size_t max_out)
 {
 	size_t n = 0, i = 0;
@@ -163,26 +159,4 @@ size_t sigil_scan_category_avx2(const sigil_store_t *st, uint16_t category,
 	return n;
 }
 
-#else /* !SIGIL_X86 — fall back so the library builds anywhere */
-
-size_t sigil_scan_similar_avx2(const sigil_store_t *st, const uint64_t *query,
-                               uint32_t max_distance,
-                               uint32_t *out, size_t max_out)
-{
-	return sigil_scan_similar_scalar(st, query, max_distance, out, max_out);
-}
-
-size_t sigil_scan_timerange_avx2(const sigil_store_t *st,
-                                 uint32_t start, uint32_t end,
-                                 uint32_t *out, size_t max_out)
-{
-	return sigil_scan_timerange_scalar(st, start, end, out, max_out);
-}
-
-size_t sigil_scan_category_avx2(const sigil_store_t *st, uint16_t category,
-                                uint32_t *out, size_t max_out)
-{
-	return sigil_scan_category_scalar(st, category, out, max_out);
-}
-
-#endif
+#endif /* SIGIL_X86 */
