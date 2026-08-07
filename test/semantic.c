@@ -62,7 +62,7 @@ static const struct pair unrelated[] = {
 };
 
 static int embed_pair(sigil_embedder_t *e, const sigil_simhash_t *sh,
-                      const struct pair *p, uint32_t *ha, uint32_t *hb)
+                      const struct pair *p, uint64_t *ha, uint64_t *hb)
 {
 	sigil_t sa, sb;
 
@@ -70,8 +70,8 @@ static int embed_pair(sigil_embedder_t *e, const sigil_simhash_t *sh,
 		return -1;
 	if (sigil_generate_semantic(e, sh, p->b, strlen(p->b), 0, 0, NULL, &sb) != 0)
 		return -1;
-	*ha = sa.lsh;
-	*hb = sb.lsh;
+	memcpy(ha, sa.lsh, sizeof(sa.lsh));
+	memcpy(hb, sb.lsh, sizeof(sb.lsh));
 	return 0;
 }
 
@@ -81,7 +81,7 @@ int main(int argc, char **argv)
 	sigil_embedder_t *e;
 	sigil_simhash_t sh;
 	unsigned para_sum = 0, unrel_sum = 0;
-	unsigned para_max = 0, unrel_min = 32;
+	unsigned para_max = 0, unrel_min = SIGIL_LSH_BITS;
 	size_t npara = sizeof(paraphrases) / sizeof(paraphrases[0]);
 	size_t nunrel = sizeof(unrelated) / sizeof(unrelated[0]);
 	int failures = 0;
@@ -111,15 +111,15 @@ int main(int argc, char **argv)
 
 	printf("paraphrases (should be CLOSE — low Hamming distance):\n");
 	for (size_t i = 0; i < npara; i++) {
-		uint32_t a, b;
+		uint64_t a[SIGIL_LSH_WORDS], b[SIGIL_LSH_WORDS];
 		unsigned d;
 
-		if (embed_pair(e, &sh, &paraphrases[i], &a, &b) != 0) {
+		if (embed_pair(e, &sh, &paraphrases[i], a, b) != 0) {
 			printf("  ERROR embedding %s\n", paraphrases[i].label);
 			failures++;
 			continue;
 		}
-		d = (unsigned)__builtin_popcount(a ^ b);
+		d = sigil_hamming(a, b);
 		para_sum += d;
 		if (d > para_max)
 			para_max = d;
@@ -128,15 +128,15 @@ int main(int argc, char **argv)
 
 	printf("\nunrelated (should be FAR — high Hamming distance):\n");
 	for (size_t i = 0; i < nunrel; i++) {
-		uint32_t a, b;
+		uint64_t a[SIGIL_LSH_WORDS], b[SIGIL_LSH_WORDS];
 		unsigned d;
 
-		if (embed_pair(e, &sh, &unrelated[i], &a, &b) != 0) {
+		if (embed_pair(e, &sh, &unrelated[i], a, b) != 0) {
 			printf("  ERROR embedding %s\n", unrelated[i].label);
 			failures++;
 			continue;
 		}
-		d = (unsigned)__builtin_popcount(a ^ b);
+		d = sigil_hamming(a, b);
 		unrel_sum += d;
 		if (d < unrel_min)
 			unrel_min = d;
@@ -151,10 +151,10 @@ int main(int argc, char **argv)
 		printf("mean unrelated distance:  %.1f\n", umean);
 		printf("separation:               %.1f bits\n", umean - pmean);
 
-		/* A real embedding should separate these by a wide margin. Six
-		 * bits out of 32 is conservative: measured separation with
-		 * MiniLM is around nine. */
-		if (umean - pmean < 6.0) {
+		/* A real embedding should separate these by a wide margin.
+		 * Scaled from the 32-bit era, where 6 of 32 bits was the
+		 * conservative floor against a measured ~9. */
+		if (umean - pmean < 6.0 * SIGIL_LSH_BITS / 32.0) {
 			printf("\nFAIL: paraphrases are not meaningfully closer than\n"
 			       "      unrelated text. The LSH bits are not semantic.\n");
 			failures++;

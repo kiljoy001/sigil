@@ -55,7 +55,7 @@ static float next_gaussian(uint64_t *state)
 int sigil_simhash_init(sigil_simhash_t *sh, size_t dim, uint64_t seed)
 {
 	uint64_t state = seed;
-	size_t n = 32 * dim;
+	size_t n = (size_t)SIGIL_LSH_BITS * dim;
 
 	sh->planes = malloc(n * sizeof(float));
 	if (!sh->planes)
@@ -76,11 +76,13 @@ void sigil_simhash_free(sigil_simhash_t *sh)
 	sh->dim = 0;
 }
 
-uint32_t sigil_simhash_project(const sigil_simhash_t *sh, const float *vec)
+void sigil_simhash_project(const sigil_simhash_t *sh, const float *vec,
+                           uint64_t *out)
 {
-	uint32_t bits = 0;
+	for (int w = 0; w < SIGIL_LSH_WORDS; w++)
+		out[w] = 0;
 
-	for (int b = 0; b < 32; b++) {
+	for (int b = 0; b < SIGIL_LSH_BITS; b++) {
 		const float *plane = sh->planes + (size_t)b * sh->dim;
 		float dot = 0.0f;
 
@@ -88,9 +90,8 @@ uint32_t sigil_simhash_project(const sigil_simhash_t *sh, const float *vec)
 			dot += vec[i] * plane[i];
 
 		if (dot > 0.0f)
-			bits |= 1u << b;
+			out[b / 64] |= 1ULL << (b % 64);
 	}
-	return bits;
 }
 
 int sigil_generate_semantic(sigil_embedder_t *emb, const sigil_simhash_t *sh,
@@ -118,7 +119,7 @@ int sigil_generate_semantic(sigil_embedder_t *emb, const sigil_simhash_t *sh,
 	sigil_generate(text, len, timestamp, category, trits, out);
 
 	/* Replace the byte-hash LSH with the semantic projection. */
-	out->lsh = sigil_simhash_project(sh, vec);
+	sigil_simhash_project(sh, vec, out->lsh);
 
 	free(vec);
 	return 0;

@@ -11,14 +11,15 @@
 
 #include "sigil.h"
 
-size_t sigil_scan_similar_scalar(const sigil_store_t *st, uint32_t query,
+size_t sigil_scan_similar_scalar(const sigil_store_t *st, const uint64_t *query,
                                  uint32_t max_distance,
                                  uint32_t *out, size_t max_out)
 {
 	size_t n = 0;
 
 	for (size_t i = 0; i < st->count && n < max_out; i++) {
-		if (sigil_hamming(st->lsh[i], query) <= max_distance)
+		if (sigil_hamming(st->lsh + i * SIGIL_LSH_WORDS, query)
+		    <= max_distance)
 			out[n++] = (uint32_t)i;
 	}
 	return n;

@@ -64,7 +64,8 @@ static void run_case(size_t count)
 		memset(&s, 0, sizeof(s));
 		for (int j = 0; j < SIGIL_HASH_LEN; j++)
 			s.hash[j] = (uint8_t)rnd();
-		s.lsh = rnd();
+		for (int j = 0; j < SIGIL_LSH_WORDS; j++)
+			s.lsh[j] = ((uint64_t)rnd() << 32) | rnd();
 		/* Straddle 2^31 so the signed-compare bias is exercised. */
 		s.timestamp = rnd();
 		s.category  = (uint16_t)(rnd() & 0x3f);
@@ -87,11 +88,15 @@ static void run_case(size_t count)
 		return;
 	}
 
-	/* Similarity across the full distance range, including 0 and 32. */
-	for (uint32_t d = 0; d <= 32; d += 4) {
-		uint32_t q = rnd();
-		size_t a = sigil_scan_similar_scalar(&st, q, d, out_s, count + 1);
-		size_t b = sigil_scan_similar_avx2(&st, q, d, out_v, count + 1);
+	/* Similarity across the full distance range, 0 to SIGIL_LSH_BITS. */
+	for (uint32_t d = 0; d <= SIGIL_LSH_BITS; d += 8) {
+		uint64_t q[SIGIL_LSH_WORDS];
+		size_t a, b;
+
+		for (int j = 0; j < SIGIL_LSH_WORDS; j++)
+			q[j] = ((uint64_t)rnd() << 32) | rnd();
+		a = sigil_scan_similar_scalar(&st, q, d, out_s, count + 1);
+		b = sigil_scan_similar_avx2(&st, q, d, out_v, count + 1);
 
 		check("similar", a, out_s, b, out_v);
 	}
@@ -177,7 +182,8 @@ int main(void)
 
 	printf("sigil differential tests (AVX2 %s)\n",
 	       sigil_have_avx2() ? "available" : "NOT available — comparing scalar to itself");
-	printf("sizeof(sigil_t) = %zu\n", sizeof(sigil_t));
+	printf("sizeof(sigil_t) = %zu, LSH %d bits\n",
+	       sizeof(sigil_t), SIGIL_LSH_BITS);
 
 	test_trits();
 

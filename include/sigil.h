@@ -24,30 +24,58 @@ extern "C" {
 /* ---------------------------------------------------------------------------
  * Layout
  *
- * 32 bytes, one cache line. The size is load-bearing: the scan is bound by
- * memory bandwidth, and a 33-byte record straddles lines and gives back the
- * locality the index-free design exists to exploit. Do not grow this struct.
+ * 48 bytes.
  *
- *   [ 0..20)  SHA-1 content hash      identity
- *   [20..24)  LSH semantic bits       similarity (Hamming distance)
- *   [24..28)  Unix timestamp          time-range queries
- *   [28..30)  category code           classification
- *   [30..32)  packed trits            6 ternary semantic hints
+ *   [ 0..16)  LSH semantic bits       similarity (128 bits, Hamming distance)
+ *   [16..36)  SHA-1 content hash      identity
+ *   [36..40)  Unix timestamp          time-range queries
+ *   [40..42)  category code           classification
+ *   [42..44)  packed trits            6 ternary semantic hints
+ *   [44..48)  tail padding            (see below)
+ *
+ * The LSH array leads because it needs 8-byte alignment: with the 20-byte hash
+ * first the compiler inserts four bytes of padding before it and the record
+ * becomes 56 bytes. Leading with lsh packs the whole thing into 48 with no
+ * interior holes, and the four trailing bytes are ordinary tail padding.
+ *
+ * On the LSH width. This was 32 bits, which measured at 0.5495 recall@1
+ * against a float32 ceiling of 0.8140 on Quora Duplicate Questions — the
+ * compression was discarding a third of what the embedding model knew. 128
+ * bits reaches ~0.785, about 96.5% of the ceiling, for 2.6x the scan time.
+ * Beyond that the curve flattens hard: 256 bits buys 1.8 more points and 512
+ * buys 2.9, so the remaining headroom is in the embedding model, not the code
+ * width.
+ *
+ * On the record size. An earlier version of this comment claimed 32 bytes was
+ * load-bearing because it is one cache line. That was wrong, and wrong in a
+ * way worth recording: under the struct-of-arrays store below, records are
+ * never scanned as records. A similarity pass walks the lsh[] array, whose
+ * stride is the LSH field alone, so total record size does not affect scan
+ * locality at all. The cache-line argument was inherited from an
+ * array-of-structs design this code does not use.
+ *
+ * 128 bits also happens to be the common SIMD register width: one NEON
+ * register exactly, two AVX2 lanes with no cross-lane fixups. See scan_avx2.c.
  * ------------------------------------------------------------------------ */
 
 #define SIGIL_HASH_LEN 20
-#define SIGIL_SIZE     32
+#define SIGIL_SIZE     48
+
+/* LSH width. Changing this invalidates every sigil ever written: bits made at
+ * one width are not comparable to bits made at another. */
+#define SIGIL_LSH_BITS  128
+#define SIGIL_LSH_WORDS (SIGIL_LSH_BITS / 64)
 
 typedef struct {
-	uint8_t  hash[SIGIL_HASH_LEN]; /* SHA-1 of content            */
-	uint32_t lsh;                  /* locality-sensitive bits     */
-	uint32_t timestamp;            /* seconds since epoch         */
-	uint16_t category;             /* classification code         */
-	uint16_t trits;                /* packed, see trit.c          */
+	uint64_t lsh[SIGIL_LSH_WORDS];   /* locality-sensitive bits       */
+	uint8_t  hash[SIGIL_HASH_LEN];   /* SHA-1 of content              */
+	uint32_t timestamp;              /* seconds since epoch           */
+	uint16_t category;               /* classification code           */
+	uint16_t trits;                  /* packed, see trit.c            */
 } sigil_t;
 
-/* The whole design rests on this. */
-_Static_assert(sizeof(sigil_t) == SIGIL_SIZE, "sigil_t must be exactly 32 bytes");
+/* Guards against silent padding changes; the on-disk format depends on it. */
+_Static_assert(sizeof(sigil_t) == SIGIL_SIZE, "sigil_t must be exactly 48 bytes");
 
 /* ---------------------------------------------------------------------------
  * Trits
@@ -122,7 +150,7 @@ int sigil_from_hex(const char *hex, sigil_t *out);
  * ------------------------------------------------------------------------ */
 
 typedef struct {
-	uint32_t *lsh;        /* [count] */
+	uint64_t *lsh;        /* [count * SIGIL_LSH_WORDS], row-major */
 	uint32_t *timestamp;  /* [count] */
 	uint16_t *category;   /* [count] */
 	uint16_t *trits;      /* [count] */
@@ -152,11 +180,12 @@ int sigil_store_get(const sigil_store_t *st, size_t i, sigil_t *out);
  * max_out) and return the number written.
  * ------------------------------------------------------------------------ */
 
-/* Indices where popcount(lsh[i] ^ query) <= max_distance. */
-size_t sigil_scan_similar_scalar(const sigil_store_t *st, uint32_t query,
+/* Indices where the Hamming distance between lsh[i] and query (which points
+ * to SIGIL_LSH_WORDS words) is <= max_distance. */
+size_t sigil_scan_similar_scalar(const sigil_store_t *st, const uint64_t *query,
                                  uint32_t max_distance,
                                  uint32_t *out, size_t max_out);
-size_t sigil_scan_similar_avx2(const sigil_store_t *st, uint32_t query,
+size_t sigil_scan_similar_avx2(const sigil_store_t *st, const uint64_t *query,
                                uint32_t max_distance,
                                uint32_t *out, size_t max_out);
 
@@ -177,10 +206,14 @@ size_t sigil_scan_category_avx2(const sigil_store_t *st, uint16_t category,
 /* Runtime dispatch: AVX2 where available, scalar otherwise. */
 int sigil_have_avx2(void);
 
-/* Hamming distance between two LSH words. */
-static inline uint32_t sigil_hamming(uint32_t a, uint32_t b)
+/* Hamming distance between two LSH codes, each SIGIL_LSH_WORDS words. */
+static inline uint32_t sigil_hamming(const uint64_t *a, const uint64_t *b)
 {
-	return (uint32_t)__builtin_popcount(a ^ b);
+	uint32_t d = 0;
+
+	for (int i = 0; i < SIGIL_LSH_WORDS; i++)
+		d += (uint32_t)__builtin_popcountll(a[i] ^ b[i]);
+	return d;
 }
 
 #ifdef __cplusplus

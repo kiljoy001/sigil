@@ -105,7 +105,7 @@ int main(int argc, char **argv)
 	char **docs;
 	size_t n = 0, dim;
 	float *vecs;
-	uint32_t *bits;
+	uint64_t *bits;
 	size_t hit_float = 0, hit_lsh = 0;
 	double t0;
 
@@ -146,7 +146,7 @@ int main(int argc, char **argv)
 	printf("embedder: %s (dim %zu)\n\n", e->name(e), dim);
 
 	vecs = malloc(n * dim * sizeof(float));
-	bits = malloc(n * sizeof(uint32_t));
+	bits = malloc(n * SIGIL_LSH_WORDS * sizeof(uint64_t));
 	if (!vecs || !bits) {
 		fprintf(stderr, "out of memory for %zu x %zu embeddings\n", n, dim);
 		free(vecs); free(bits);
@@ -162,7 +162,8 @@ int main(int argc, char **argv)
 			sigil_simhash_free(&sh); e->destroy(e);
 			return 2;
 		}
-		bits[i] = sigil_simhash_project(&sh, vecs + i * dim);
+		sigil_simhash_project(&sh, vecs + i * dim,
+		                      bits + i * SIGIL_LSH_WORDS);
 		if ((i + 1) % 200 == 0) {
 			fprintf(stderr, "\r  embedded %zu/%zu", i + 1, n);
 			fflush(stderr);
@@ -182,7 +183,7 @@ int main(int argc, char **argv)
 		size_t truth = i ^ 1; /* positional ground truth */
 		size_t best_f = SIZE_MAX, best_l = SIZE_MAX;
 		double best_cos = -2.0;
-		uint32_t best_ham = 33;
+		uint32_t best_ham = SIGIL_LSH_BITS + 1;
 
 		for (size_t j = 0; j < n; j++) {
 			double c;
@@ -195,7 +196,8 @@ int main(int argc, char **argv)
 				best_cos = c;
 				best_f = j;
 			}
-			h = sigil_hamming(bits[i], bits[j]);
+			h = sigil_hamming(bits + i * SIGIL_LSH_WORDS,
+			                  bits + j * SIGIL_LSH_WORDS);
 			if (h < best_ham) {
 				best_ham = h;
 				best_l = j;
@@ -213,8 +215,8 @@ int main(int argc, char **argv)
 
 		printf("recall@1\n");
 		printf("  float32 cosine (ceiling): %.4f\n", rf);
-		printf("  %d-bit LSH:               %.4f  (%.1f%% of ceiling)\n",
-		       32, rl, rf > 0 ? 100.0 * rl / rf : 0.0);
+		printf("  %d-bit LSH:              %.4f  (%.1f%% of ceiling)\n",
+		       SIGIL_LSH_BITS, rl, rf > 0 ? 100.0 * rl / rf : 0.0);
 		printf("\n");
 		printf("The ceiling is a property of the embedding model, not of the\n");
 		printf("LSH width. Closing the gap to it needs more bits; raising it\n");

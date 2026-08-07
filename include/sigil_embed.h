@@ -4,20 +4,17 @@
 /*
  * Semantic embedding backend.
  *
- * The 32 LSH bits in a sigil are only meaningful if they come from meaning.
- * A byte-level hash gives two documents about the same topic in different
- * words unrelated bits, which makes "semantic filesystem" a false claim. This
- * header defines where real embeddings enter.
+ * The LSH bits in a sigil are only meaningful if they come from meaning. A
+ * byte-level hash gives two documents about the same topic in different words
+ * unrelated bits, which makes "semantic filesystem" a false claim. This header
+ * defines where real embeddings enter.
  *
  * The pipeline is: text -> dense vector (384-dim for MiniLM) -> SimHash
- * against fixed random hyperplanes -> 32 bits. SimHash is the right reduction
- * because the probability two vectors land on the same side of a random
- * hyperplane is 1 - theta/pi, so Hamming distance in the compressed space is a
- * direct estimator of angular distance in the original. Cosine similarity
- * survives the squeeze; a truncation or a quantization would not preserve it.
- *
- * Measured on all-MiniLM-L6-v2 with paraphrase pairs sharing no vocabulary:
- * paraphrases land at Hamming 8-12, unrelated pairs at 19-22 out of 32.
+ * against fixed random hyperplanes -> SIGIL_LSH_BITS bits. SimHash is the
+ * right reduction because the probability two vectors land on the same side of
+ * a random hyperplane is 1 - theta/pi, so Hamming distance in the compressed
+ * space is a direct estimator of angular distance in the original. Cosine
+ * similarity survives the squeeze; truncation or quantization would not.
  *
  * The backend is a vtable so libsigil keeps no hard dependency on any ML
  * runtime. Link the llama.cpp backend for real embeddings, or the hash
@@ -34,7 +31,18 @@ extern "C" {
 #endif
 
 /* Dimensionality of all-MiniLM-L6-v2. Other models differ; the SimHash
- * projection adapts, but a set of hyperplanes is only valid for one width. */
+ * projection adapts, but a set of hyperplanes is only valid for one width.
+ *
+ * Measured on Quora Duplicate Questions (recall@1, float32 ceiling 0.8140):
+ *    32 bits  0.550   67.5% of ceiling
+ *   128 bits  0.785   96.5% of ceiling   <- SIGIL_LSH_BITS
+ *   256 bits  0.803   98.6%
+ *   512 bits  0.810   99.4%
+ * Past 128 the remaining headroom is in the embedding model, not the width.
+ *
+ * INT8 quantization of the embedding costs nothing measurable at this width
+ * (0.7880 vs 0.7880), because SimHash reads only sign(dot) and quantization
+ * noise almost never flips it. NPU inference is therefore quality-neutral. */
 #define SIGIL_EMBED_DIM_MINILM 384
 
 typedef struct sigil_embedder sigil_embedder_t;
@@ -67,7 +75,7 @@ struct sigil_embedder {
  * ------------------------------------------------------------------------ */
 
 typedef struct {
-	float *planes;  /* [32 * dim], row-major */
+	float *planes;  /* [SIGIL_LSH_BITS * dim], row-major */
 	size_t dim;
 	uint64_t seed;
 } sigil_simhash_t;
@@ -75,8 +83,10 @@ typedef struct {
 int  sigil_simhash_init(sigil_simhash_t *sh, size_t dim, uint64_t seed);
 void sigil_simhash_free(sigil_simhash_t *sh);
 
-/* Project a dense vector to 32 bits. */
-uint32_t sigil_simhash_project(const sigil_simhash_t *sh, const float *vec);
+/* Project a dense vector to SIGIL_LSH_BITS bits, written to out[] as
+ * SIGIL_LSH_WORDS words. */
+void sigil_simhash_project(const sigil_simhash_t *sh, const float *vec,
+                           uint64_t *out);
 
 /* ---------------------------------------------------------------------------
  * Generating sigils from text

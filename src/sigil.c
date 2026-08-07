@@ -111,30 +111,35 @@ static void sha1_final(sha1_ctx *c, uint8_t out[20])
  * (MinHash / Word2Vec / BERT) and lands in these same 32 bits. Swapping this
  * out changes no other code.
  */
-static uint32_t compute_lsh(const uint8_t *p, size_t n)
+static void compute_lsh(const uint8_t *p, size_t n, uint64_t *out)
 {
-	uint32_t bits = 0;
+	for (int w = 0; w < SIGIL_LSH_WORDS; w++)
+		out[w] = 0;
 
 	if (n == 0)
-		return 0;
+		return;
 
-	/* 32 buckets; each 4-byte shingle sets the bit for its bucket. */
+	/* SIGIL_LSH_BITS buckets; each 4-byte shingle sets its bucket's bit. */
 	for (size_t i = 0; i + 4 <= n; i++) {
 		uint32_t sh = ((uint32_t)p[i] << 24) | ((uint32_t)p[i + 1] << 16) |
 		              ((uint32_t)p[i + 2] << 8) | (uint32_t)p[i + 3];
+		unsigned b;
 
 		sh ^= sh >> 16;
 		sh *= 0x7feb352du;
 		sh ^= sh >> 15;
-		bits |= 1u << (sh & 31);
+		b = sh % SIGIL_LSH_BITS;
+		out[b / 64] |= 1ULL << (b % 64);
 	}
 
 	/* Short inputs have no 4-byte shingle; fall back to the bytes. */
 	if (n < 4) {
-		for (size_t i = 0; i < n; i++)
-			bits |= 1u << (p[i] & 31);
+		for (size_t i = 0; i < n; i++) {
+			unsigned b = (unsigned)p[i] % SIGIL_LSH_BITS;
+
+			out[b / 64] |= 1ULL << (b % 64);
+		}
 	}
-	return bits;
 }
 
 /* --- Public --------------------------------------------------------------- */
@@ -149,7 +154,7 @@ void sigil_generate(const void *content, size_t len, uint32_t timestamp,
 	sha1_update(&c, (const uint8_t *)content, len);
 	sha1_final(&c, out->hash);
 
-	out->lsh       = compute_lsh((const uint8_t *)content, len);
+	compute_lsh((const uint8_t *)content, len, out->lsh);
 	out->timestamp = timestamp;
 	out->category  = category;
 	out->trits     = trits ? sigil_trits_pack(trits) : 0;

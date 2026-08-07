@@ -42,6 +42,7 @@ int main(int argc, char **argv)
 	size_t count = (argc > 1) ? strtoull(argv[1], NULL, 10) : 10000000;
 	sigil_store_t st;
 	uint32_t *out;
+	const uint64_t *qry;
 	double t0, t1;
 	size_t found;
 	const int reps = 5;
@@ -59,7 +60,8 @@ int main(int argc, char **argv)
 		sigil_t s;
 
 		memset(&s, 0, sizeof(s));
-		s.lsh       = rnd();
+		for (int j = 0; j < SIGIL_LSH_WORDS; j++)
+			s.lsh[j] = ((uint64_t)rnd() << 32) | rnd();
 		s.timestamp = rnd();
 		s.category  = (uint16_t)(rnd() & 0xff);
 		s.trits     = (uint16_t)(rnd() % SIGIL_TRIT_MAX);
@@ -70,6 +72,15 @@ int main(int argc, char **argv)
 	 * writing indices — we are measuring the scan, not the output. */
 	out = malloc(65536 * sizeof(uint32_t));
 	if (!out) { sigil_store_free(&st); return 1; }
+
+	{
+		/* Fixed query; contents are irrelevant to scan cost. */
+		static uint64_t q[SIGIL_LSH_WORDS];
+
+		for (int j = 0; j < SIGIL_LSH_WORDS; j++)
+			q[j] = 0x0123456789abcdefULL * (unsigned long long)(j + 1);
+		qry = q;
+	}
 
 	printf("\n%-22s %10s %12s %10s\n", "kernel", "ms", "GB/s", "matches");
 
@@ -86,12 +97,15 @@ int main(int argc, char **argv)
 		       (double)(bytes_touched) / best / 1e9, found);        \
 	} while (0)
 
+	/* A tight radius so the scan runs to completion instead of filling
+	 * the result buffer: this measures scanning, not result writing.
+	 * Random 128-bit codes sit ~64 bits apart, so 40 matches nothing. */
 	BENCH("similar scalar",
-	      sigil_scan_similar_scalar(&st, 0x12345678u, 4, out, 65536),
-	      count * sizeof(uint32_t));
+	      sigil_scan_similar_scalar(&st, qry, 40, out, 65536),
+	      count * SIGIL_LSH_WORDS * sizeof(uint64_t));
 	BENCH("similar avx2",
-	      sigil_scan_similar_avx2(&st, 0x12345678u, 4, out, 65536),
-	      count * sizeof(uint32_t));
+	      sigil_scan_similar_avx2(&st, qry, 40, out, 65536),
+	      count * SIGIL_LSH_WORDS * sizeof(uint64_t));
 
 	BENCH("timerange scalar",
 	      sigil_scan_timerange_scalar(&st, 0, 0x01000000u, out, 65536),
@@ -109,10 +123,10 @@ int main(int argc, char **argv)
 
 	printf("\nnotes:\n");
 	printf("  LSH pass touches %.2f GB of %.2f GB total (SoA split)\n",
-	       (double)count * sizeof(uint32_t) / 1e9,
+	       (double)count * SIGIL_LSH_WORDS * sizeof(uint64_t) / 1e9,
 	       (double)count * SIGIL_SIZE / 1e9);
 	printf("  a whole-record scan would move %.1fx more memory\n",
-	       (double)SIGIL_SIZE / sizeof(uint32_t));
+	       (double)SIGIL_SIZE / (SIGIL_LSH_WORDS * sizeof(uint64_t)));
 	printf("  a kernel reporting %zu matches hit the result cap and exited\n",
 	       (size_t)65536);
 	printf("  early — its GB/s is not a full-scan figure. The similarity\n");

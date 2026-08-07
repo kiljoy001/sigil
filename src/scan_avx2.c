@@ -4,13 +4,14 @@
 /*
  * AVX2 scan kernels.
  *
- * Eight 32-bit lanes per YMM register. These must agree with the scalar
- * kernels bit-for-bit on every input; test/differential.c is the enforcement.
+ * These must agree with the scalar kernels bit-for-bit on every input;
+ * test/differential.c is the enforcement. A wrong kernel here does not crash,
+ * it returns subtly wrong distances that look plausible forever.
  *
  * AVX2 has no vpopcntd (that is AVX-512 VPOPCNTDQ), so population count goes
  * through the standard nibble-table shuffle: split each byte into two nibbles,
  * look both up in a 16-entry table replicated across both 128-bit halves via
- * vpshufb, then sum. Roughly four instructions per eight words.
+ * vpshufb, then sum the bytes with vpsadbw.
  */
 
 #include "sigil.h"
@@ -37,55 +38,60 @@ int sigil_have_avx2(void)
 
 #ifdef SIGIL_X86
 
+
+/*
+ * 128-bit LSH similarity.
+ *
+ * Each record is two u64 words, so one YMM register holds exactly two records
+ * and the per-record distance is a sum over its own 128-bit half. This is a
+ * better fit than the old 32-bit layout, which needed maddubs/madd folding to
+ * keep per-record totals from bleeding across lanes.
+ *
+ * vpsadbw does the work: it sums absolute byte differences into four u64
+ * fields, one per 64-bit group. Against a zeroed operand that is just a byte
+ * sum, so after the nibble-LUT popcount each u64 lane holds the bit count for
+ * its own word. Adding the two lanes of a 128-bit half gives that record's
+ * distance, and the halves are independent — no cross-lane shuffles.
+ */
 __attribute__((target("avx2")))
-static inline __m256i popcount_epi32(__m256i v)
-{
-	/* vpshufb operates per 128-bit lane, so the table is duplicated. */
-	const __m256i lut = _mm256_setr_epi8(
-		0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
-		0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
-	const __m256i mask = _mm256_set1_epi8(0x0f);
-
-	__m256i lo = _mm256_and_si256(v, mask);
-	__m256i hi = _mm256_and_si256(_mm256_srli_epi16(v, 4), mask);
-	__m256i cnt = _mm256_add_epi8(_mm256_shuffle_epi8(lut, lo),
-	                              _mm256_shuffle_epi8(lut, hi));
-
-	/* Byte counts -> 32-bit lane totals. maddubs sums adjacent byte pairs
-	 * into 16-bit fields, then madd sums those pairs into 32-bit lanes,
-	 * which keeps each total inside the lane it came from. */
-	__m256i sum16 = _mm256_maddubs_epi16(cnt, _mm256_set1_epi8(1));
-	__m256i sum32 = _mm256_madd_epi16(sum16, _mm256_set1_epi16(1));
-
-	return sum32;
-}
-
-__attribute__((target("avx2")))
-size_t sigil_scan_similar_avx2(const sigil_store_t *st, uint32_t query,
+size_t sigil_scan_similar_avx2(const sigil_store_t *st, const uint64_t *query,
                                uint32_t max_distance,
                                uint32_t *out, size_t max_out)
 {
 	size_t n = 0, i = 0;
-	const __m256i q   = _mm256_set1_epi32((int)query);
-	const __m256i thr = _mm256_set1_epi32((int)max_distance);
+	const __m256i lut = _mm256_setr_epi8(
+		0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
+		0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
+	const __m256i mask = _mm256_set1_epi8(0x0f);
+	const __m256i zero = _mm256_setzero_si256();
+	/* Broadcast the two query words across both 128-bit halves. */
+	const __m256i q = _mm256_setr_epi64x((long long)query[0], (long long)query[1],
+	                                     (long long)query[0], (long long)query[1]);
 
-	for (; i + 8 <= st->count && n + 8 <= max_out; i += 8) {
-		__m256i v    = _mm256_load_si256((const __m256i *)(st->lsh + i));
-		__m256i dist = popcount_epi32(_mm256_xor_si256(v, q));
-		/* dist <= thr  <=>  !(dist > thr); both operands are small and
-		 * non-negative, so signed compare is safe. */
-		__m256i gt   = _mm256_cmpgt_epi32(dist, thr);
-		int mask     = ~_mm256_movemask_ps(_mm256_castsi256_ps(gt)) & 0xff;
+	/* Two records per iteration. */
+	for (; i + 2 <= st->count && n + 2 <= max_out; i += 2) {
+		__m256i v = _mm256_load_si256(
+			(const __m256i *)(st->lsh + i * SIGIL_LSH_WORDS));
+		__m256i x = _mm256_xor_si256(v, q);
+		__m256i lo = _mm256_and_si256(x, mask);
+		__m256i hi = _mm256_and_si256(_mm256_srli_epi16(x, 4), mask);
+		__m256i cnt = _mm256_add_epi8(_mm256_shuffle_epi8(lut, lo),
+		                              _mm256_shuffle_epi8(lut, hi));
+		/* Four u64 lanes, each the popcount of one LSH word. */
+		__m256i sums = _mm256_sad_epu8(cnt, zero);
+		uint64_t s[4];
 
-		while (mask) {
-			int lane = __builtin_ctz((unsigned)mask);
-			out[n++] = (uint32_t)(i + (size_t)lane);
-			mask &= mask - 1;
-		}
+		_mm256_storeu_si256((__m256i *)s, sums);
+
+		if ((uint32_t)(s[0] + s[1]) <= max_distance)
+			out[n++] = (uint32_t)i;
+		if ((uint32_t)(s[2] + s[3]) <= max_distance)
+			out[n++] = (uint32_t)(i + 1);
 	}
 
 	for (; i < st->count && n < max_out; i++) {
-		if (sigil_hamming(st->lsh[i], query) <= max_distance)
+		if (sigil_hamming(st->lsh + i * SIGIL_LSH_WORDS, query)
+		    <= max_distance)
 			out[n++] = (uint32_t)i;
 	}
 	return n;
@@ -159,7 +165,7 @@ size_t sigil_scan_category_avx2(const sigil_store_t *st, uint16_t category,
 
 #else /* !SIGIL_X86 — fall back so the library builds anywhere */
 
-size_t sigil_scan_similar_avx2(const sigil_store_t *st, uint32_t query,
+size_t sigil_scan_similar_avx2(const sigil_store_t *st, const uint64_t *query,
                                uint32_t max_distance,
                                uint32_t *out, size_t max_out)
 {
