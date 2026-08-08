@@ -202,9 +202,9 @@ Not built:
   to open rather than return wrong answers.
 - **Indexer.** Nothing walks a directory yet. Only tests create sigils.
 - **9P2000 server.** The planned frontend, so a semantic query is a directory walk
-  rather than something smuggled through an ioctl. Base 9P2000 rather than `.L`: the
-  extensions exist for POSIX fidelity this does not need, and base 9P2000 talks to
-  Linux v9fs, plan9port and native Plan 9 alike.
+  rather than something smuggled through an ioctl. Both dependencies are verified —
+  libtab round-trips under plan9port and a lib9p test server served a live namespace
+  over the protocol. See [`docs/9P-PLAN.md`](docs/9P-PLAN.md).
 - **Clustering and the classifier**, which follow from persistence.
 
 The tools in `tools/` work standalone today, without any of the above:
