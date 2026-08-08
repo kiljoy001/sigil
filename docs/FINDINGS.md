@@ -827,15 +827,50 @@ sheet and 279 workbooks move with it.
 duplicates", and it needs no similarity at all — the edge is explicit in the
 formula text.
 
+### The label layer: similarity works there too
+
+Formulas get exact identity; labels and headers are the other layer, and this
+is where similarity has to earn its place — on text that is terse, abbreviated,
+and often not sentences at all ("Q3 Rev", "MMBTU/D", "Ttl"). Given that MiniLM
+did badly on short notation-heavy strings in the math tests, this could have
+failed.
+
+`tools/xlsx_text.py` extracts label groups rather than single cells: a header
+row or a label column read together, since "Q3" alone carries almost nothing.
+Median group length across a 120-workbook sample was 68 characters — genuinely
+embeddable.
+
+Ground truth is workbook authorship. Enron filenames carry the employee whose
+mailbox the file came from, and one person's spreadsheets share subject matter.
+Weak but external and free, the same reasoning as same-paper retrieval.
+
+174 workbooks, 25 owners:
+
+| method | R@1 | R@5 | vs chance |
+|---|---|---|---|
+| random | 0.0361 | 0.1681 | 1x |
+| float32 | 0.6494 | 0.7529 | 18x |
+| 128-bit | 0.5690 | 0.7184 | 16x (87.6% of ceiling) |
+| 256-bit | 0.5575 | 0.6839 | 15x (85.8% of ceiling) |
+
+The absolute recall is higher than the citation benchmark partly because 25
+owners is a coarser target than 951 works. The more comparable figure is
+compression retention, and at 87.6% for 128 bits it beats academic paragraphs
+(76.8%) — spreadsheet labels are apparently easier to tell apart than dense
+technical prose.
+
+So all three layers are validated on the same corpus: formulas hash exactly,
+labels embed usefully, and cell references are explicit.
+
 ### Why spreadsheets suit this better than papers
 
 Three layers, each matched to a mechanism the project already has:
 
-| layer | mechanism | basis |
+| layer | mechanism | measured |
 |---|---|---|
-| formulas | AST hash | exact identity |
-| labels, headers, comments | LSH | prose similarity |
-| cell references | graph edges | asserted, not derived |
+| formulas | AST hash | 99.9999% coverage, 6 failures in 4.7M |
+| labels, headers | LSH | R@1 0.65, 18x chance |
+| cell references | graph edges | explicit in syntax, 279 workbooks on one source |
 
 The third is the one academic prose lacked. Citations gave clustering its
 skeleton (F1 0.755 against ~0.15 for similarity alone), and cell references are
