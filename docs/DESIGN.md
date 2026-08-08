@@ -3,6 +3,37 @@
 Where the project is going and why. `FINDINGS.md` records what was measured;
 this records what was decided.
 
+## The motivating use case
+
+A researcher opens a paper. Two panels sit alongside it:
+
+**Cited** — the papers this one references, indexed at paragraph level. The
+reader selects a block of text and sees which passages *in the cited works*
+relate to it. The citation edge defines the candidate set; similarity ranks
+within it.
+
+**Potentially related** — the whole corpus, served at *paper* granularity
+rather than paragraph. Titles the reader might want, not claims about specific
+passages.
+
+The split is not cosmetic; it matches what each mechanism can support.
+Similarity ranks well but partitions badly, so it is used for ranking inside a
+set that citations already bounded. Where it must range over the whole corpus,
+the unit coarsens to the paper, because paragraph-level precision at rank 1 is
+around 0.20 while "this paper is worth a glance" tolerates far more error.
+
+Two further properties fall out of it:
+
+- The search is **user-initiated**. The reader selects the block, so intent is
+  explicit and no classifier has to guess.
+- It **degrades honestly**. A wrong paragraph pointer asserts that a specific
+  passage is relevant, which is a strong claim to get wrong. A wrong title in a
+  "potentially related" list costs a glance.
+
+Scoping similarity inside a citation cluster also avoids the failure measured
+in FINDINGS.md: similarity was destructive when it *bridged between* citation
+groups. Here it never crosses that boundary.
+
 ## Shape
 
 Three programs composing over a 9P namespace, not one application with

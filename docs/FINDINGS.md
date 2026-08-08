@@ -742,6 +742,24 @@ serves neighbourhood queries, where it is validated at 305x chance, and stays
 out of partitioning, where it is measurably harmful. Corpora with no asserted
 edges may have no cluster view at all; that is untested.
 
+### Document representation: averaging is enough
+
+For the corpus-wide "potentially related" tier, a paper needs one
+representation. Measured by retrieving the right paper from half its own
+paragraphs (223 arXiv papers, chance 0.0045):
+
+| representation | recall@1 | cost |
+|---|---|---|
+| doc-average | 0.7713 | 1 sigil per paper |
+| max-paragraph | 0.7937 | full paragraph scan, ~30x |
+
+2.2 points for 30x the work. The concern that averaging blurs a paper toward a
+field-wide centroid did not materialize — mean cosine between different papers
+under averaging is 0.199, so they stay well separated.
+
+This validates the `para = 0` document sigil: the coarse tier scans one record
+per paper.
+
 ### A llama.cpp gotcha worth recording
 
 `llama-embedding` reading from **stdin concatenates every line into one
