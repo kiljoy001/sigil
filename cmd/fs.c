@@ -33,11 +33,14 @@ statstext(Sigilfs *f)
 		"embed_dim\t%d\n"
 		"lsh_bits\t%d\n"
 		"simhash_seed\t%llux\n"
+		"indexed\t%llud\n"
+		"thresh\t%d\n"
 		"mounts\t%d\n",
 		f->nrecords, f->nscans,
 		f->storepath ? f->storepath : "(memory)",
 		f->model_id ? f->model_id : "(none)",
 		f->embed_dim, f->lsh_bits, f->simhash_seed,
+		f->nindexed, f->thresh,
 		f->nmounts);
 
 	for(m = f->mounts; m != nil && n < sizeof(buf) - 128; m = m->next)
@@ -54,7 +57,8 @@ fsread(Req *r)
 	if(f == fs.ctl){
 		/* Reading /ctl reports the verbs it accepts, so the interface
 		 * is discoverable with cat rather than documentation. */
-		readstr(r, "mount <name> <root>\nindex <path>\nthresh <n>\n");
+		readstr(r, "mount <name> <root>\nindex [<name>]\n"
+		           "thresh <n>\ncommit\n");
 		tracereq(r, "read", nil);
 		respond(r, nil);
 		return;
@@ -117,7 +121,7 @@ fswstat(Req *r)
 
     if(tracing)
         fprint(2, "TRACE wstat-raw qid.type=%#ux qid.vers=%#lux qid.path=%#llux "
-                  "mode=%#luo mtime=%#lux length=%lld name=%q\n",
+                  "mode=%#luo mtime=%#lux length=%lld name=\"%s\"\n",
                d->qid.type, d->qid.vers, d->qid.path,
                d->mode, d->mtime, d->length, d->name ? d->name : "");
 

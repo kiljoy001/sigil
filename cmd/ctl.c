@@ -69,14 +69,12 @@ dothresh(Sigilfs *f, int argc, char **argv)
 {
 	int n;
 
-	USED(f);
 	if(argc != 2)
 		return "usage: thresh <n>";
 	n = atoi(argv[1]);
 	if(n < 0 || n > 512)
 		return "thresh: out of range";
-	/* Stored once the scan path exists; accepted now so the interface is
-	 * stable. */
+	f->thresh = n;
 	return nil;
 }
 
@@ -100,8 +98,22 @@ oneline(Sigilfs *f, char *line)
 		return domount(f, argc, argv);
 	if(strcmp(argv[0], "thresh") == 0)
 		return dothresh(f, argc, argv);
-	if(strcmp(argv[0], "index") == 0)
-		return "index: not implemented yet";
+	if(strcmp(argv[0], "index") == 0){
+		Mount *m;
+
+		if(argc == 1){
+			char *err = nil;
+			for(m = f->mounts; m != nil; m = m->next)
+				if((err = index_mount(f, m)) != nil)
+					return err;
+			return nil;
+		}
+		if((m = mountfind(f, argv[1])) == nil)
+			return "index: no such mount";
+		return index_mount(f, m);
+	}
+	if(strcmp(argv[0], "commit") == 0)
+		return store_commit(f);
 	return "sigilfs: unknown control verb";
 }
 

@@ -52,6 +52,8 @@ struct Sigilfs {
 	/* Counters surfaced through /stats. */
 	uvlong nscans;
 	uvlong nrecords;
+	uvlong nindexed;   /* files read, not paragraphs */
+	int thresh;        /* Hamming radius for /similar */
 };
 
 /* sigilfs.c */
@@ -75,8 +77,30 @@ void fsstat(Req *r);
 char *ctlwrite(Sigilfs *f, char *line);
 Mount *mountfind(Sigilfs *f, char *name);
 
-/* store.c -- the bridge to libsigil */
+/* store.c -- setup */
 void sigilfs_init(Sigilfs *f, char *storepath);
-long sigilfs_count(Sigilfs *f);
+
+/* persist.c -- libtab load and commit */
+char *store_load(Sigilfs *f);
+char *store_commit(Sigilfs *f);
+
+/* index.c -- walk a mount and add paragraph records */
+char *index_mount(Sigilfs *f, Mount *m);
+
+/* bridge.c -- compiled with the system C compiler, not 9c: plan9port's
+ * libc.h and C11's stdint.h collide, so libsigil is reached only through
+ * these plain-typed entry points. */
+void *br_new(void);
+void br_free(void *b);
+long br_add(void *b, const char *path, unsigned para, const void *text,
+            unsigned long len, const unsigned long long *lsh, unsigned ts);
+long br_add_hex(void *b, const char *path, unsigned para, const char *lshhex);
+long br_count(void *b);
+const char *br_path(void *b, long i);
+unsigned br_para(void *b, long i);
+int br_hash(void *b, long i, char *out, unsigned long outlen);
+int br_lsh_hex(void *b, long i, char *out, unsigned long outlen);
+long br_find_hash(void *b, const char *hexhash);
+long br_similar(void *b, long i, unsigned maxdist, unsigned *out, long maxout);
 
 #endif /* SIGILFS_H */

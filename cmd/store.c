@@ -24,6 +24,10 @@
 enum {
 	Defaultdim  = 384,
 	Defaultbits = 256,
+	/* Hamming radius for /similar. Paraphrases measured around 38 bits
+	 * apart at 128 bits and unrelated text around 65; scaled to 256 this
+	 * is a deliberately tight default. */
+	Defaultthresh = 60,
 };
 
 void
@@ -35,12 +39,9 @@ sigilfs_init(Sigilfs *f, char *storepath)
 	f->embed_dim = Defaultdim;
 	f->lsh_bits = Defaultbits;
 	f->simhash_seed = 0x5191c0de5191c0deULL;
-	f->store = nil;      /* allocated when persistence lands */
+	f->thresh = Defaultthresh;
+	f->store = br_new();
+	if(f->store == nil)
+		sysfatal("br_new: out of memory");
 	f->nrecords = 0;
-}
-
-long
-sigilfs_count(Sigilfs *f)
-{
-	return f->nrecords;
 }

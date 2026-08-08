@@ -12,16 +12,31 @@ MONOCYPHER ?= $(HOME)/Repo/objective-9c
 CC9 = $(PLAN9)/bin/9c
 LD9 = $(PLAN9)/bin/9l
 
-SRC  = sigilfs.c fs.c ctl.c store.c trace.c
-OBJ  = $(SRC:.c=.o)
+# Two compilers on purpose. Everything here is plan9port C except bridge.c,
+# which is the only file that sees libsigil: plan9port's libc.h and C11's
+# stdint.h define the same typedefs and collide, so the two worlds meet
+# through plain-typed functions and an opaque pointer.
+SRC  = sigilfs.c fs.c ctl.c store.c trace.c persist.c index.c
+OBJ  = $(SRC:.c=.o) bridge.o
+
+SIGIL_ROOT = ..
 
 TABSRC = $(wildcard $(LIBTAB_SRC)/*.c) $(MONOCYPHER)/monocypher.c
 TABOBJ = $(notdir $(TABSRC:.c=.o))
 
 all: sigilfs
 
-sigilfs: $(OBJ) libtab.a
-	$(LD9) -o $@ $(OBJ) libtab.a -l9p -l9pclient -lthread
+sigilfs: $(OBJ) libtab.a $(SIGIL_ROOT)/libsigil.a
+	$(LD9) -o $@ $(OBJ) libtab.a $(SIGIL_ROOT)/libsigil.a \
+		-l9p -l9pclient -lthread
+
+# System compiler, C11, no plan9port headers.
+bridge.o: bridge.c $(SIGIL_ROOT)/include/sigil.h
+	cc -O2 -std=c11 -Wall -Wextra -c bridge.c -o $@ \
+		-I$(SIGIL_ROOT)/include -I$(SIGIL_ROOT)/third_party/blake3
+
+$(SIGIL_ROOT)/libsigil.a:
+	$(MAKE) -C $(SIGIL_ROOT) libsigil.a
 
 # Vendored build of libtab from source: it ships no library target of its own.
 libtab.a: $(TABSRC)

@@ -114,6 +114,7 @@ threadmain(int argc, char **argv)
 	char *mtpt = nil;
 	char *store = nil;
 	char *addr = nil;
+	char *err;
 
 	ARGBEGIN{
 	case 'D':
@@ -142,6 +143,15 @@ threadmain(int argc, char **argv)
 		usage();
 
 	sigilfs_init(&fs, store);
+
+	/* Load before serving: a client that attaches mid-load would see a
+	 * partial store and get wrong answers from a scan. Refusing to start
+	 * on a parameter mismatch is deliberate -- bits made under a different
+	 * model or seed are not comparable, and silently scanning them would
+	 * return plausible nonsense. */
+	if((err = store_load(&fs)) != nil)
+		sysfatal("store: %s", err);
+
 	buildtree();
 
 	fs.srv.read = fsread;
