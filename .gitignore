@@ -24,3 +24,8 @@ test/data/pairs.json
 # RKNN converter debug dumps (tools/convert-rknn.py writes these to cwd)
 *.onnx
 !tools/*.py
+
+# sigilfs build output (plan9port objects)
+cmd/*.o
+cmd/*.a
+cmd/sigilfs
