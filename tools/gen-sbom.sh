@@ -1,10 +1,10 @@
 #!/bin/sh
 # Generate an SPDX 2.3 SBOM for sigil.
 #
-# sigil has no third-party runtime dependencies: no libc beyond the platform's
-# own, no crypto library, no 9P library. SHA-1 is implemented in src/sigil.c
-# precisely so the dependency list stays empty. That is the main thing this
-# document records, and it is worth being able to prove rather than assert.
+# sigil has one vendored dependency (BLAKE3, portable C, under
+# third_party/blake3) and no external runtime ones: no libc beyond the
+# platform's own, no separate crypto library, no 9P library. Recording that
+# precisely is the main point of this document.
 #
 # The toolchain is captured as a build-time relationship because it affects the
 # artifact (AVX2 codegen in particular) without being linked into it.
@@ -90,6 +90,17 @@ cat <<EOF
       "licenseDeclared": "Apache-2.0",
       "copyrightText": "NOASSERTION",
       "comment": "OPTIONAL model weights, not distributed with this source. Supplied by the user at runtime as a GGUF file and loaded by the llama.cpp backend. Recorded here because the LSH bits a store contains depend on which model produced them."
+    },
+    {
+      "SPDXID": "SPDXRef-Package-blake3",
+      "name": "BLAKE3",
+      "versionInfo": "NOASSERTION",
+      "downloadLocation": "https://github.com/BLAKE3-team/BLAKE3",
+      "filesAnalyzed": false,
+      "licenseConcluded": "CC0-1.0 OR Apache-2.0",
+      "licenseDeclared": "CC0-1.0 OR Apache-2.0",
+      "copyrightText": "Copyright (c) 2019-2026 Jack O'Connor and Samuel Neves",
+      "comment": "VENDORED under third_party/blake3, portable C only. Provides content identity (BLAKE3-256), replacing a hand-rolled SHA-1. Upstream SIMD files are deliberately omitted; see third_party/blake3/README.md."
     }
   ],
   "files": [
@@ -110,6 +121,11 @@ $(emit_files)
       "spdxElementId": "SPDXRef-Package-sigil",
       "relationshipType": "OPTIONAL_DEPENDENCY_OF",
       "relatedSpdxElement": "SPDXRef-Package-minilm"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-blake3",
+      "relationshipType": "CONTAINED_BY",
+      "relatedSpdxElement": "SPDXRef-Package-sigil"
     }
   ],
   "annotations": [

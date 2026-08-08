@@ -1,6 +1,6 @@
 CC      ?= cc
 CFLAGS  ?= -O2 -g -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wconversion
-CPPFLAGS = -Iinclude
+CPPFLAGS = -Iinclude -Ithird_party/blake3
 LDFLAGS ?=
 LDLIBS   = -lm
 
@@ -20,7 +20,15 @@ endif
 # Default model for the semantic test.
 MODEL ?= $(HOME)/models/all-MiniLM-L6-v2-f16.gguf
 
-SRC  = src/sigil.c src/trit.c src/store.c src/scan_scalar.c \
+# BLAKE3 portable only: sigil has its own SIMD dispatch, and a second
+# independent CPU-detection layer is a liability rather than a speedup.
+CPPFLAGS += -DBLAKE3_NO_AVX512 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_SSE41 \
+            -DBLAKE3_NO_SSE2 -DBLAKE3_USE_NEON=0
+
+BLAKE3 = third_party/blake3/blake3.c third_party/blake3/blake3_dispatch.c \
+         third_party/blake3/blake3_portable.c
+
+SRC  = $(BLAKE3) src/sigil.c src/trit.c src/store.c src/scan_scalar.c \
        src/scan_x86.c src/scan_sse.c src/scan_neon.c src/scan_generic.c src/scan_range.c \
        src/simhash.c src/embed_llama.c
 OBJ  = $(SRC:.c=.o)
@@ -39,6 +47,11 @@ $(LIB): $(OBJ)
 
 %.o: %.c include/sigil.h include/sigil_embed.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
+
+# Vendored third-party code builds without sigil's stricter warnings: it is
+# not ours to fix, and patching it would complicate re-vendoring upstream.
+third_party/blake3/%.o: third_party/blake3/%.c
+	$(CC) -O2 -g -std=c11 -Wall $(CPPFLAGS) -c $< -o $@
 
 test/differential: test/differential.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) -o $@ $(LDFLAGS) $(LDLIBS)

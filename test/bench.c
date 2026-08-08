@@ -62,6 +62,8 @@ int main(int argc, char **argv)
 		memset(&s, 0, sizeof(s));
 		for (int j = 0; j < SIGIL_LSH_WORDS; j++)
 			s.lsh[j] = ((uint64_t)rnd() << 32) | rnd();
+		s.para      = rnd() & 0xffff;
+		s.cluster   = rnd() & 0xffff;
 		s.timestamp = rnd();
 		s.category  = (uint16_t)(rnd() & 0xff);
 		s.trits     = (uint16_t)(rnd() % SIGIL_TRIT_MAX);

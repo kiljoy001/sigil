@@ -67,6 +67,8 @@ static void run_case(size_t count)
 		for (int j = 0; j < SIGIL_LSH_WORDS; j++)
 			s.lsh[j] = ((uint64_t)rnd() << 32) | rnd();
 		/* Straddle 2^31 so the signed-compare bias is exercised. */
+		s.para      = rnd() & 0xffff;
+		s.cluster   = rnd() & 0xffff;
 		s.timestamp = rnd();
 		s.category  = (uint16_t)(rnd() & 0x3f);
 		s.trits     = (uint16_t)(rnd() % SIGIL_TRIT_MAX);

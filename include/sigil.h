@@ -24,59 +24,75 @@ extern "C" {
 /* ---------------------------------------------------------------------------
  * Layout
  *
- * 48 bytes.
+ * 64 bytes, one cache line, no padding.
  *
- *   [ 0..16)  LSH semantic bits       similarity (128 bits, Hamming distance)
- *   [16..36)  SHA-1 content hash      identity
- *   [36..40)  Unix timestamp          time-range queries
- *   [40..42)  category code           classification
- *   [42..44)  packed trits            6 ternary semantic hints
- *   [44..48)  tail padding            (see below)
+ *   [ 0..16)  LSH code       128 bits, SimHash over the paragraph embedding
+ *   [16..48)  BLAKE3         256 bits, full width
+ *   [48..52)  para index     0 = document-level, 1..n = paragraphs
+ *   [52..56)  Unix timestamp
+ *   [56..58)  category code  user-defined meaning, see docs/DESIGN.md
+ *   [58..60)  packed trits   6 ternary semantic hints
+ *   [60..64)  cluster ref    index into the cluster table
  *
- * The LSH array leads because it needs 8-byte alignment: with the 20-byte hash
- * first the compiler inserts four bytes of padding before it and the record
- * becomes 56 bytes. Leading with lsh packs the whole thing into 48 with no
- * interior holes, and the four trailing bytes are ordinary tail padding.
+ * The path is deliberately absent: it is variable-length and lives in the
+ * libtab table alongside this record.
  *
- * On the LSH width. This was 32 bits, which measured at 0.5495 recall@1
- * against a float32 ceiling of 0.8140 on Quora Duplicate Questions — the
- * compression was discarding a third of what the embedding model knew. 128
- * bits reaches ~0.785, about 96.5% of the ceiling, for 2.6x the scan time.
- * Beyond that the curve flattens hard: 256 bits buys 1.8 more points and 512
- * buys 2.9, so the remaining headroom is in the embedding model, not the code
- * width.
+ * On the unit. A sigil describes a paragraph, not a file. Whole-document
+ * embedding forces one vector to represent everything a document says, and the
+ * embedder truncates at 512 tokens regardless, so most of a long document was
+ * being silently discarded. Paragraphs are the human-shaped unit — a sentence
+ * fragments an idea, a fixed window cuts across one. para == 0 holds the
+ * document-level average for coarse queries; 1..n locate the passage.
  *
- * On the record size. An earlier version of this comment claimed 32 bytes was
- * load-bearing because it is one cache line. That was wrong, and wrong in a
- * way worth recording: under the struct-of-arrays store below, records are
- * never scanned as records. A similarity pass walks the lsh[] array, whose
- * stride is the LSH field alone, so total record size does not affect scan
- * locality at all. The cache-line argument was inherited from an
- * array-of-structs design this code does not use.
+ * On the hash. BLAKE3 at full 256 bits, replacing SHA-1. SHA-1 has
+ * constructible collisions and runs at ~271 MB/s here; BLAKE3 is ~3 GB/s
+ * portable and has no known weakness. Full width rather than truncated to 128:
+ * truncation is unreachable by accident (~1.5e-21 at a billion paragraphs) but
+ * only 2^64 work to attack deliberately, and collision resistance cannot be
+ * retrofitted once stores exist. See docs/DESIGN.md on the threat model.
  *
- * 128 bits also happens to be the common SIMD register width: one NEON
- * register exactly, two AVX2 lanes with no cross-lane fixups. See scan_x86.c
- * and scan_neon.c.
+ * On the LSH width. 32 bits measured 0.5495 recall@1 against a float32 ceiling
+ * of 0.8140 on Quora Duplicate Questions — the compression was discarding a
+ * third of what the embedding model knew. 128 bits reaches 0.7882, about 96.7%
+ * of the ceiling. Past that the curve flattens: 256 bits buys 1.8 more points,
+ * 512 buys 2.9. The remaining headroom is in the model, not the width.
+ *
+ * On the record size. Growing from 48 to 64 bytes does not affect scan speed.
+ * Under the struct-of-arrays store below, records are never scanned as
+ * records: a similarity pass walks the lsh[] array alone, whose stride is 16
+ * bytes whatever the record's total width. An earlier version of this comment
+ * argued 32 bytes was load-bearing because it is one cache line; that was
+ * inherited from an array-of-structs design this code does not use, and it was
+ * being used to reject exactly the widening that mattered most.
+ *
+ * 128 bits is also the common SIMD register width: one NEON or SSE register
+ * exactly, two AVX2 lanes with no cross-lane fixups. See scan_x86.c,
+ * scan_sse.c, scan_neon.c.
  * ------------------------------------------------------------------------ */
 
-#define SIGIL_HASH_LEN 20
-#define SIGIL_SIZE     48
+#define SIGIL_HASH_LEN 32
+#define SIGIL_SIZE     64
 
 /* LSH width. Changing this invalidates every sigil ever written: bits made at
  * one width are not comparable to bits made at another. */
 #define SIGIL_LSH_BITS  128
 #define SIGIL_LSH_WORDS (SIGIL_LSH_BITS / 64)
 
+/* para index reserved for the document-level average of a file's paragraphs. */
+#define SIGIL_PARA_DOC  0
+
 typedef struct {
 	uint64_t lsh[SIGIL_LSH_WORDS];   /* locality-sensitive bits       */
-	uint8_t  hash[SIGIL_HASH_LEN];   /* SHA-1 of content              */
+	uint8_t  hash[SIGIL_HASH_LEN];   /* BLAKE3-256 of the paragraph   */
+	uint32_t para;                   /* 0 = document, 1..n = paragraph*/
 	uint32_t timestamp;              /* seconds since epoch           */
-	uint16_t category;               /* classification code           */
+	uint16_t category;               /* user-defined; see DESIGN.md   */
 	uint16_t trits;                  /* packed, see trit.c            */
+	uint32_t cluster;                /* index into the cluster table  */
 } sigil_t;
 
 /* Guards against silent padding changes; the on-disk format depends on it. */
-_Static_assert(sizeof(sigil_t) == SIGIL_SIZE, "sigil_t must be exactly 48 bytes");
+_Static_assert(sizeof(sigil_t) == SIGIL_SIZE, "sigil_t must be exactly 64 bytes");
 
 /* ---------------------------------------------------------------------------
  * Trits
@@ -128,15 +144,21 @@ static inline int sigil_trits_valid(uint16_t packed)
  * Construction
  * ------------------------------------------------------------------------ */
 
-/* Build a sigil from content. Computes the SHA-1 and LSH bits internally. */
+/* Build a document-level sigil (para == SIGIL_PARA_DOC) from content.
+ * Computes the BLAKE3 hash and LSH bits internally. */
 void sigil_generate(const void *content, size_t len, uint32_t timestamp,
                     uint16_t category, const sigil_trits_t *trits,
                     sigil_t *out);
 
-/* Hex-encode to buf (needs >= 65 bytes: 32 bytes * 2 + NUL). */
+/* As above, for a numbered paragraph. */
+void sigil_generate_para(const void *content, size_t len, uint32_t para,
+                         uint32_t timestamp, uint16_t category,
+                         const sigil_trits_t *trits, sigil_t *out);
+
+/* Hex-encode to buf (needs >= SIGIL_SIZE*2+1 bytes). */
 void sigil_to_hex(const sigil_t *s, char *buf);
 
-/* Parse 64 hex chars. Returns 0 on success, -1 on malformed input. */
+/* Parse SIGIL_SIZE*2 hex chars. Returns 0 on success, -1 on malformed input. */
 int sigil_from_hex(const char *hex, sigil_t *out);
 
 /* ---------------------------------------------------------------------------
@@ -153,6 +175,8 @@ int sigil_from_hex(const char *hex, sigil_t *out);
 
 typedef struct {
 	uint64_t *lsh;        /* [count * SIGIL_LSH_WORDS], row-major */
+	uint32_t *para;       /* [count] */
+	uint32_t *cluster;    /* [count] */
 	uint32_t *timestamp;  /* [count] */
 	uint16_t *category;   /* [count] */
 	uint16_t *trits;      /* [count] */

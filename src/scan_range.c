@@ -24,6 +24,8 @@ static sigil_store_t view(const sigil_store_t *st, size_t lo, size_t hi)
 
 	memset(&v, 0, sizeof(v));
 	v.lsh       = st->lsh + lo * SIGIL_LSH_WORDS;
+	v.para      = st->para + lo;
+	v.cluster   = st->cluster + lo;
 	v.timestamp = st->timestamp + lo;
 	v.category  = st->category + lo;
 	v.trits     = st->trits + lo;
