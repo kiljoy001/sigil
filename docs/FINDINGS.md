@@ -578,6 +578,52 @@ set from Quora alone and the header comment claiming "the remaining headroom is
 in the model, not the width" is true only for that corpus. 256 is the better
 default: 89.6% on the hard corpus, 98.3% on the easy one, 32 bytes per record.
 
+### Summarize-then-compare: right for labels, not for retrieval
+
+A summary is reusable (O(N) calls rather than O(N^2) pairwise), inspectable by
+a human, and doubles as the cluster label the classifier needs. The question
+was whether summarizing is itself a lossy step that reintroduces the failures
+above.
+
+**Summaries preserve the distinctions that matter.** All six contradiction
+pairs stayed distinct after summarization — negation survived ("should not",
+"not positive"), direction survived (rose/fell), quantities survived (30 vs 90
+days). The feared collapse did not happen.
+
+**But summarizing does not improve retrieval.** The hypothesis was that
+stripping boilerplate (author lists, arXiv headers, affiliations) would sharpen
+similarity:
+
+| | cosine separation | Hamming separation |
+|---|---|---|
+| originals | +0.554 | +24.0 bits |
+| summaries | +0.535 | +23.0 bits |
+
+Unchanged, within noise. The embedder was already handling the boilerplate.
+Summarizing costs ~700 ms per paragraph and adds a hallucination surface for no
+retrieval gain.
+
+**One real hazard.** The model turned "the tenant is responsible for repairs"
+into "the tenant is *not* responsible for repairs" — a hallucinated negation on
+exactly the axis that matters. Cluster labels get read by humans, which is the
+mitigation; summaries should not feed an automated decision unreviewed.
+
+**Consequence:** the classifier summarizes clusters *after* the scan groups
+them, rather than summarizing everything up front. Cheaper and it puts a human
+in front of the error-prone step.
+
+### Paragraph length: chunk, do not truncate
+
+Long paragraphs exceed the model's context. Truncating discards content
+silently, which is the failure this project keeps rediscovering. Instead
+`tools/embed_chunked.py` splits at sentence boundaries, embeds each chunk, and
+averages the vectors before renormalizing.
+
+Averaging in float space is the correct combiner. Hashing the codes together
+would destroy the locality that makes them useful (one flipped input bit
+changes half the output), and a per-bit majority vote quantizes before
+averaging rather than after.
+
 ### A llama.cpp gotcha worth recording
 
 `llama-embedding` reading from **stdin concatenates every line into one
