@@ -769,6 +769,63 @@ have corrupted every number here. Always assert the returned count.
 
 ---
 
+## Spreadsheets: the identity channel transfers, and better
+
+The math AST work established that anything with a parseable grammar can have
+an exact identity channel alongside probabilistic prose similarity. Excel is
+the obvious next candidate, and the Enron corpus — ~15,900 real workbooks
+released through litigation — is the test.
+
+`tools/xlsx_ast.py` tokenizes a formula, canonicalizes it (absolute markers
+normalized, case folded, commutative functions sorted) and hashes the tree.
+Measured on 300 workbooks, 1.59 million formulas:
+
+| | LaTeX via LaTeXML | Excel |
+|---|---|---|
+| parse coverage | 99.3% | **100.00%** |
+| speed | ~20 ms/expression | **0.04 ms/formula** |
+
+500x faster and complete. But the first attempt scored **66%**, not 100 — the
+grammar was missing named ranges (`CBalancingVol`) and error values (`#REF!`).
+Those were gaps in the tokenizer, not in Excel. Prediction from "the grammar is
+closed" was right about the destination and wrong about the first attempt,
+which is now the fourth time this project has needed a measurement to correct
+an inference.
+
+### Duplicated logic is real and abundant
+
+From 300 workbooks: **97,977 distinct computations appear in more than one
+workbook.** The most-shared reach 46 files:
+
+```
+46 workbooks  =VLOOKUP(G11,DDENA_USERS,2,FALSE)
+46 workbooks  =SUMIF($T$19:$T$5002,A6,$S$19:$S$5002)
+46 workbooks  =COUNTIF($T$19:$T$5001,A6)
+```
+
+The obvious objection — that these are the same file saved repeatedly — does
+not hold: all 300 files are byte-distinct, zero exact duplicates. These are
+different workbooks sharing computations, which is copy-paste sprawl made
+visible.
+
+### Why spreadsheets suit this better than papers
+
+Three layers, each matched to a mechanism the project already has:
+
+| layer | mechanism | basis |
+|---|---|---|
+| formulas | AST hash | exact identity |
+| labels, headers, comments | LSH | prose similarity |
+| cell references | graph edges | asserted, not derived |
+
+The third is the one academic prose lacked. Citations gave clustering its
+skeleton (F1 0.755 against ~0.15 for similarity alone), and cell references are
+the same kind of signal — stated, sparse, non-chaining — but far denser and
+extractable without ambiguity. Where a citation's *scope* is hard to automate,
+a formula's precedents are explicit in the syntax.
+
+---
+
 ## Machines
 
 | name | CPU | SIMD | accelerator |
