@@ -149,15 +149,25 @@ cmd/sigilfs -s sigil &                   # posts a 9P service
 9pfuse "$NAMESPACE/sigil" /mnt/sigil     # or mount -t 9p
 
 cat /mnt/sigil/stats
-echo 'mount docs /home/me/notes' >> /mnt/sigil/ctl
+echo 'mount docs /home/me/notes' > /mnt/sigil/ctl
 ```
 
-Use `>>` rather than `>`. Shell truncation makes v9fs send a `Twstat` to set mtime,
-and 64-bit plan9port rejects every conformant `Twstat` — a `(ulong)` cast applied to a
-32-bit wire field, where `ulong` is 8 bytes. It is not a client bug: plan9port's own
-`nulldir()` + `dirfwstat()` trips it. Diagnosis and one-word fix in
-[`docs/PLAN9PORT-BUG.md`](docs/PLAN9PORT-BUG.md). `>>`, `dd conv=notrunc` and
-`9p write` are unaffected.
+Or over TCP, which is what v9fs needs:
+
+```sh
+cmd/sigilfs -a 'tcp!127.0.0.1!5640' &
+sudo mount -t 9p -o trans=tcp,port=5640,version=9p2000,uname=$USER,access=user \
+    127.0.0.1 /mnt/sigil
+```
+
+`version=9p2000` must be explicit: v9fs defaults to `9p2000.L`, which lib9p does not
+speak. Add `-L` to sigilfs for a per-request trace when something misbehaves.
+
+Build against a plan9port source tree, not `/usr/local/plan9`. An installed copy may
+predate the lib9p fix for a 64-bit `wstat` bug — a `(ulong)` cast applied to a 32-bit
+wire field — which makes shell `>` redirection onto `/ctl` fail with `ESERVERFAULT`.
+Upstream master still carries it; diagnosis and fix in
+[`docs/PLAN9PORT-BUG.md`](docs/PLAN9PORT-BUG.md).
 
 ## Build
 
