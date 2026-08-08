@@ -173,6 +173,35 @@ is no universal taxonomy that fits, so the *meaning* of each code is a per-store
 declaration in a libtab table. sigilfs never needs to know what a code means; it
 filters on equality.
 
+## Clusters come from asserted edges, not similarity
+
+Measured: similarity-only clustering has no usable operating point. Connected
+components at cos >= 0.60 puts 2018 of 5000 items in one cluster; at 0.70 it
+separates co-cited passages 92% of the time. Mutual k-NN fails the same way.
+This is at float32, so no bit width fixes it — prose forms a continuum, and
+transitive linkage chases it across the whole corpus.
+
+Asserted edges do not chain, because they are sparse and stated rather than
+derived. Citation edges alone reached F1 0.755 with a largest cluster of 6,
+against ~0.15 for any similarity threshold. Adding similarity on top collapsed
+purity to 0.009 — it bridges groups that should stay separate.
+
+The two signals are orthogonal. A citation points at a specific claim; an
+embedding summarizes a passage. Two paragraphs citing one work may be adopting
+and disputing it respectively, and their prose reflects that difference.
+
+So the namespace has two mechanisms doing two jobs:
+
+```
+/similar/<hex>/   similarity — neighbourhood queries, 305x chance
+/class/<id>/      asserted edges — citations, imports, reply-chains,
+                  symlinks, shared edit sessions
+```
+
+Neither pretends to do the other's work. A corpus with no asserted edges may
+have no cluster view, which is untested and an open question for loose
+personal documents.
+
 ## Cluster identity
 
 A cluster's ID is a hash of its sorted member LSH codes. Identity is

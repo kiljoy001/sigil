@@ -662,6 +662,86 @@ would destroy the locality that makes them useful (one flipped input bit
 changes half the output), and a per-bit majority vote quantizes before
 averaging rather than after.
 
+### Compression reorders the head of the list; it rarely loses answers
+
+R@1 is the harshest possible measure and matches no real interface. Fraction of
+the float32 ceiling retained, by how many results a user sees:
+
+| | R@1 | R@10 | R@20 | R@100 |
+|---|---|---|---|---|
+| 128-bit | 57.3% | 71.4% | 75.4% | 87.6% |
+| 256-bit | 73.7% | 83.1% | 85.8% | 93.2% |
+| 512-bit | 87.9% | 92.3% | 93.3% | 97.2% |
+
+Rank displacement shows the mechanism. Of the 1377 queries float32 answered at
+rank 1:
+
+| | median new rank | stays rank 1 | still top-10 |
+|---|---|---|---|
+| 256-bit | 1 | 63.4% | 91.4% |
+| 512-bit | 1 | 76.2% | 97.9% |
+
+Median displacement is zero at 256 bits. Compression shuffles the top of the
+list rather than discarding correct results.
+
+### Similarity-only clustering does not work
+
+Connected components at a similarity threshold — the method this design
+originally specified — has no usable operating point on real prose:
+
+| threshold | co-cited together | largest cluster |
+|---|---|---|
+| cos >= 0.60 | 0.389 | **2018** of 5000 |
+| cos >= 0.70 | 0.080 | 182 |
+| cos >= 0.75 | 0.028 | 29 |
+
+Loose thresholds chain A-B-C until half the corpus is one blob; tight ones
+fragment so badly that co-cited passages are separated 92% of the time. Mutual
+k-NN fails identically (k=5: together 0.413, purity 0.002, largest 2472).
+
+**This is at float32.** It is not a compression problem and no bit width fixes
+it. Academic prose forms a continuum rather than islands, and every
+transitive-linkage method chases that continuum across the corpus.
+
+### Asserted edges cluster; mixing them with similarity is destructive
+
+Citations are sparse and stated, so they do not chain:
+
+| scheme | together | purity | F1 | largest |
+|---|---|---|---|---|
+| **citation-only (30% observed)** | **0.607** | 1.000 | **0.755** | 6 |
+| union with sim >= 0.70 | 0.718 | **0.009** | 0.018 | **1316** |
+| union with sim >= 0.75 | 0.671 | 0.049 | 0.092 | 509 |
+
+Against similarity-only clustering, which could not exceed F1 ~0.15 at any
+threshold. But *adding* similarity to citation edges collapses purity from
+1.000 to 0.009 — it bridges between groups that should stay separate.
+
+**The two signals measure different things.** A citation points at a specific
+claim: "this sentence rests on that work." An embedding summarizes a whole
+passage. Two paragraphs citing the same work may do so for opposite reasons —
+one adopting a method, one disputing a result — and the surrounding prose
+reflects those different purposes. They are orthogonal, not noisy versions of
+one signal, which is why unioning them is destructive rather than merely
+imprecise.
+
+Extracting *which claim* a citation supports would be the ideal signal and is
+very hard to automate: citation scope is ambiguous, several citations may share
+a sentence, function varies (supporting, contrasting, acknowledging), and the
+relevant claim can be sentences away through anaphora. The *existence* of the
+edge is unambiguous and free, and that alone produced F1 0.755. Take the free
+part.
+
+Caveat on these numbers: purity 1.000 is an artifact of building edges from the
+ground-truth labels, so only the `together` coverage figure is meaningful. A
+real corpus has extraction errors and citations to works outside it.
+
+**Consequence:** clusters come from asserted edges — citations, imports,
+reply-chains, symlinks, directory structure — not from similarity. Similarity
+serves neighbourhood queries, where it is validated at 305x chance, and stays
+out of partitioning, where it is measurably harmful. Corpora with no asserted
+edges may have no cluster view at all; that is untested.
+
 ### A llama.cpp gotcha worth recording
 
 `llama-embedding` reading from **stdin concatenates every line into one
