@@ -41,6 +41,8 @@ CORPUS ?= test/data/corpus.txt
 # sigilfs is built with plan9port's 9c/9l, not the system compiler: it links
 # lib9p and libtab, both of which want plan9port's libc. libsigil stays plain
 # C11 and dependency-free; store.c is the only file that sees both worlds.
+# The source tree rather than /usr/local/plan9: the installed copy may predate
+# the lib9p 64-bit wstat fix. See docs/PLAN9PORT-BUG.md.
 PLAN9 ?= $(HOME)/Repo/plan9port
 LIBTAB_SRC ?= $(HOME)/Repo/objective-9c/libtab
 

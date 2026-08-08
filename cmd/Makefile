@@ -3,6 +3,8 @@
 # libthread owns main, so sigilfs defines threadmain. Link order matters:
 # libtab pulls in lib9pclient, which needs symbols from libthread.
 
+# Default to the source tree, not /usr/local/plan9: the installed copy may be
+# older and lack the lib9p 64-bit wstat fix. See docs/PLAN9PORT-BUG.md.
 PLAN9      ?= $(HOME)/Repo/plan9port
 LIBTAB_SRC ?= $(HOME)/Repo/objective-9c/libtab
 MONOCYPHER ?= $(HOME)/Repo/objective-9c

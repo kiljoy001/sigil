@@ -50,8 +50,20 @@ verdict: REJECTED
 Cast to the wire width, not the storage width:
 
 ```c
-if((uchar)~r->d.qid.type || (u32int)~r->d.qid.vers || (uvlong)~r->d.qid.path){
+if((uchar)~r->d.qid.type || (uint)~r->d.qid.vers || (uvlong)~r->d.qid.path){
 ```
+
+The same mistake appears ~8 lines later for `d.mode`, another 32-bit wire field
+stored in a `ulong`.
+
+**Already fixed locally**: `~/Repo/plan9port` commit `ad33b5fe`, "lib9p: accept
+Linux v9fs rename wstat", corrects both casts and additionally relaxes the muid
+check so a rename (which carries a name) is not rejected for also carrying a
+muid. Upstream plan9port master still has the bug as of this writing.
+
+The trap for anyone re-deriving this: `/usr/local/plan9` may be an older
+*installed* copy that predates the source tree, so the source can look correct
+while the linked library is not.
 
 ## Impact
 

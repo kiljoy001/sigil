@@ -126,15 +126,21 @@ fswstat(Req *r)
         respond(r, "sigilfs: cannot wstat");
         return;
     }
-    if(d->length != ~0ULL && d->length != 0){
+    /* length is vlong on the wire (8 bytes), so ~0ULL is correct here. */
+    if(d->length != (vlong)~0ULL && d->length != 0){
         tracereq(r, "wstat", "ctl cannot be extended");
         respond(r, "sigilfs: ctl cannot be extended");
         return;
     }
+    /* Compare against the wire width, not the storage width. Dir.mode is
+     * declared ulong -- 8 bytes on plan9port/amd64 -- but 9P carries it as 4,
+     * so the don't-touch sentinel arrives as 0x00000000FFFFFFFF and never
+     * equals ~0UL. This is the same mistake that produced the lib9p bug in
+     * docs/PLAN9PORT-BUG.md; it is easy to make. */
     if((d->name != nil && d->name[0] != '\0') ||
        (d->uid != nil && d->uid[0] != '\0') ||
        (d->gid != nil && d->gid[0] != '\0') ||
-       d->mode != ~0UL){
+       (u32int)~d->mode){
         tracereq(r, "wstat", "ctl metadata is fixed");
         respond(r, "sigilfs: ctl metadata is fixed");
         return;

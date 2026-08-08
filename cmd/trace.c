@@ -56,7 +56,7 @@ tracereq(Req *r, char *what, char *err)
 	if(strcmp(what, "write") == 0)
 		fprint(2, " off=%lld n=%ud", r->ifcall.offset, r->ifcall.count);
 	if(strcmp(what, "wstat") == 0)
-		fprint(2, " len=%lld mode=%luo name=%q",
+		fprint(2, " len=%lld mode=%luo name=\"%s\"",
 		       r->d.length, r->d.mode, r->d.name ? r->d.name : "");
 	fprint(2, " -> %s\n", err ? err : "ok");
 }
