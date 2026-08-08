@@ -7,93 +7,90 @@ therefore useful only for exact lookup. Asking "what is similar to this?" or "wh
 changed last March?" means building a second structure alongside it — an index that
 has to be maintained on every write, kept consistent, and rebuilt when it corrupts.
 
-A sigil spends 20 of its 48 bytes on identity and the rest on *queryable structure*.
-Similarity becomes Hamming distance over a packed field. Time filtering becomes an
-integer compare. Both run as a linear scan at memory bandwidth, and there is no index
-to maintain, so writes are O(1).
+A sigil puts identity and queryable structure in the same 64-byte record. Similarity
+becomes Hamming distance over a packed field, time filtering an integer compare. Both
+run as a linear scan at memory bandwidth, and there is no index to maintain, so writes
+are O(1).
 
 ```
-[ 0..16)  LSH semantic bits       similarity (128 bits, Hamming distance)
-[16..36)  SHA-1 content hash      identity
-[36..40)  Unix timestamp          time-range queries
-[40..42)  category code           classification
-[42..44)  packed trits            6 balanced-ternary hints
-[44..48)  tail padding
+[ 0..16)  LSH semantic bits   128 bits, SimHash over a paragraph embedding
+[16..48)  BLAKE3              256 bits, content identity
+[48..52)  para index          0 = document-level, 1..n = paragraphs
+[52..56)  Unix timestamp
+[56..58)  category code       user-defined meaning
+[58..60)  packed trits        6 balanced-ternary hints
+[60..64)  cluster ref
 ```
 
-48 bytes. The LSH array leads because it needs 8-byte alignment; with the hash first
-the compiler pads the record out to 56.
+A `_Static_assert` pins the size, and it has already caught one silent padding
+change: an earlier layout with a 20-byte SHA-1 needed the LSH array first, because
+putting the hash first forced four bytes of interior padding and pushed the record to
+56. BLAKE3's 32 bytes align naturally, so the ordering no longer matters — but the
+assert stays, since the on-disk format depends on it.
 
-An earlier version of this file argued that 32 bytes was load-bearing because it is
-one cache line. That was wrong. Under the struct-of-arrays store, records are never
-scanned as records — a similarity pass walks the `lsh[]` array, whose stride is the
-LSH field alone, so total record size does not affect scan locality. The cache-line
-argument was inherited from an array-of-structs design this code does not use, and it
-was being used to reject exactly the widening that turned out to matter most.
+**Status: a working library and a body of measurements, not yet an application.**
+There is no persistence, no indexer, and no server — see [Status](#status).
 
-## Measured performance
+## What is measured
 
-10M records, one core, i5-12600K:
+Everything below is reproducible from this repository. The full record, including the
+things that did not work, is in [`docs/FINDINGS.md`](docs/FINDINGS.md); the decisions
+they support are in [`docs/DESIGN.md`](docs/DESIGN.md).
 
-| kernel            |    ms | GB/s  |
-|-------------------|------:|------:|
-| similarity scalar | 22.98 |  7.0  |
-| similarity AVX2   | 10.48 | 15.3  |
+### Retrieval works, against external human judgement
 
-The similarity kernel scans every record. The scan is bandwidth-bound, not ALU-bound,
-which is the point of the layout.
+The strongest result, because the ground truth comes from outside the pipeline. Two
+paragraphs citing the same work were written by domain experts who each independently
+decided that work was relevant there, and reviewers agreed. 5000 citation contexts
+citing 951 distinct works, from unarXive, citation markers stripped so `[16]` cannot
+act as a lexical giveaway.
 
-Same source, same test, on aarch64 (RK3588, Cortex-A76):
+| method | R@1 | R@5 | vs chance |
+|---|---|---|---|
+| random | 0.0009 | 0.0045 | 1x |
+| float32 cosine | 0.2754 | 0.5362 | **305x** |
+| 512-bit LSH | 0.2420 | 0.4794 | 268x |
+| 256-bit LSH | 0.2030 | 0.4320 | 225x |
+| 128-bit LSH | 0.1578 | 0.3524 | 175x |
 
-| kernel            |    ms | GB/s  |
-|-------------------|------:|------:|
-| similarity scalar | 26.83 |  6.0  |
-| similarity NEON   | 18.09 |  8.9  |
+R@5 of 0.54 at the ceiling: given a passage, more than half the time one of its five
+nearest neighbours engages with the same prior work — written by different authors, in
+different papers, who never coordinated.
 
-**NEON is simpler but slower.** A NEON register is 128 bits — exactly one LSH code,
-no lane bookkeeping — and aarch64 has `vcntq_u8`, a real per-byte popcount, where
-AVX2 has to emulate one with a nibble table and `vpshufb`. The inner loop is three
-instructions against roughly six.
+This is a *lower* bound. Citations are sparse and biased, so a non-citation is not
+evidence of non-relatedness; many apparent misses are related passages that were
+simply not co-cited.
 
-It still only reaches 1.48x over scalar where AVX2 reaches 2.2x, and x86 finishes the
-same work in 10.48 ms against 18.09. The reasons are structural: AVX2's 256-bit
-register takes two records per iteration to NEON's one, and aarch64 has no movemask,
-so lane-selecting kernels round-trip through memory instead of extracting a bitmask.
-That second penalty is why `timerange` initially ran *slower* than scalar on ARM
-(18.08 ms vs 10.87) until a `vmaxvq` early-out was added to skip empty blocks — now
-4.66 ms. Unrolling similarity to four chains was also tried and came out slower
-(19.77 ms); the loop is memory-bound, so extra in-flight work only costs registers.
+### Exact identity where a grammar exists
 
-A wider-register ARM core (SVE2) would likely close the gap, but the Cortex-A76 has
-NEON only.
+Similarity is the wrong tool for anything with parseable structure. Two expressions
+that canonicalize to the same tree *are* the same expression — a fact, not an estimate.
 
-And on pre-AVX2 x86 (Xeon E5645, Westmere, 2010):
+| domain | tool | coverage | speed |
+|---|---|---|---|
+| LaTeX math | `tools/math_ast.py` (LaTeXML) | 99.3% | ~20 ms |
+| Excel formulas | `tools/xlsx_ast.py` | **99.9999%** | **0.05 ms** |
 
-| kernel             |     ms | GB/s  |
-|--------------------|-------:|------:|
-| similarity scalar  | 101.91 |  1.6  |
-| similarity SSE4.2  |  48.90 |  3.3  |
+The Excel figure is 6 failures in 4,713,827 real formulas from 2998 Enron workbooks.
 
-2.08x, the best relative gain of the three targets. An XMM register is 128 bits —
-exactly one LSH code, same as NEON — but unlike NEON, SSE has `movemask`, so the
-lane-selecting kernels keep results in a register instead of round-tripping through
-memory. That is worth more here than NEON's native popcount is there.
+This matters because embeddings *invert* on mathematics: across four models,
+contradictory statements scored consistently **more** similar than equivalent ones.
+`∀ε∃δ` and `∃ε∀δ` landed 6 bits apart out of 128. The mechanism is that the embedding
+is substantially bag-of-tokens — correlation between token overlap and cosine is
++0.601 — so pairs that share vocabulary while asserting the opposite score as similar.
+Operator trees do not have that failure, and score 16/16 on the same probe.
 
-Dispatch is AVX2, else SSE4.2, else scalar, chosen at runtime from cached CPUID
-probes. The vector bodies carry target attributes and the object is built for generic
-x86-64, so one binary runs everywhere — but that means the check is mandatory:
-calling an AVX2 body on a 2010 Xeon faults with SIGILL. An earlier version had the
-probe and did not branch on it, and crashed on exactly that hardware.
+### Scan throughput
 
-### Threading
+10M records, one core:
 
-The scan is embarrassingly parallel: `sigil_scan_*_range()` restricts a scan to
-`[lo, hi)` and returns absolute indices, so a caller can split the store across
-threads and concatenate results. libsigil itself stays single-threaded and free of
-a pthreads dependency — a server with request-level concurrency does not want a
-nested pool fighting it.
+| machine | ISA | scalar | SIMD | speedup |
+|---|---|---|---|---|
+| i5-12600K | AVX2 | 22.98 ms | **10.48 ms** | 2.2x |
+| Xeon E5645 | SSE4.2 | 101.91 ms | **48.90 ms** | 2.08x |
+| RK3588 (A76) | NEON | 26.83 ms | **18.09 ms** | 1.48x |
 
-Similarity scan, 10M records, `make bench-mt`:
+Threaded, over `sigil_scan_*_range()`:
 
 | machine | 1 thread | static split | work pool |
 |---|---|---|---|
@@ -102,127 +99,68 @@ Similarity scan, 10M records, `make bench-mt`:
 | RK3588 | 36.27 ms | 12.55 ms | **7.88 ms** (4.61x) |
 
 A work pool beats a static split on every machine, because all three have
-heterogeneous cores — two sockets with interleaved memory, P-cores and E-cores, or
-big.LITTLE. Static splitting waits on the slowest core; the pool lets fast cores take
-more chunks. Speedup stops where the memory controllers saturate, not where cores run
-out.
+heterogeneous cores. Static splitting waits on the slowest core.
 
-### GPU
+An OpenCL kernel (`bench/scan_opencl.c`) reaches 222 GB/s on an Arc Pro B50 — 2.9x the
+best CPU configuration — but only for a store already resident on the device; the PCIe
+upload is 43x the kernel time. Deferred until there is an application to accelerate.
 
-`bench/scan_opencl.c` is a measurement, not a backend — nothing in libsigil links
-OpenCL. On an Arc Pro B50 at 100M records the kernel runs in **7.22 ms at 222 GB/s**,
-2.9x the fastest CPU configuration, but only if the store is already resident: the
-PCIe upload is 315 ms, 43x the kernel time. A one-shot scan loses badly; a long-lived
-node amortizes it away.
+## Design decisions the measurements forced
 
-Reproduce with `make bench`, `make bench-mt`, or `./test/bench 100000000`.
+Several of these reversed an earlier choice. They are kept here because the reasoning
+is more useful than the conclusion.
 
-### On the numbers this replaces
+**The unit is a paragraph, not a file.** Whole-document embedding forces one vector to
+represent everything a document says, and the embedder truncates at 512 tokens
+regardless, so most of a long document was being silently discarded. `para = 0` holds
+a document-level average for coarse queries; `1..n` locate the passage.
 
-Earlier design notes for the predecessor project claimed a 1B-record scan in 20ms by
-counting cycles and ignoring DRAM — wrong by roughly 50x, since a full pass is
-bandwidth-bound. Those notes also claimed "16 CIDs per cycle," conflating 32-*bit*
-fingerprints with 32-*byte* records. The benchmark here reports bytes actually
-touched so the arithmetic can be checked rather than taken on faith, and uses a query
-radius tight enough that the scan runs to completion instead of filling the result
-buffer and exiting early.
+**LSH width is a per-store parameter, not a constant.** How many bits a corpus needs
+varies widely:
 
-## Struct-of-arrays
+| corpus | 128 bits | 256 | 512 |
+|---|---|---|---|
+| Quora questions | 95.6% | 98.3% | 98.8% |
+| arXiv paragraphs | 76.8% | 89.6% | 94.5% |
+| citation contexts | 57.3% | 73.7% | 87.9% |
 
-Records are stored decomposed by field, not as an array of structs. A similarity pass
-over N records touches 16N bytes of LSH words instead of 48N bytes of whole records —
-3x less memory traffic on the binding constraint. Full records are reassembled only
-for the survivors of a filter.
+(percent of that corpus's own float32 ceiling.) Short questions on unrelated topics
+separate under a coarse code; dense academic prose needs finer resolution. The
+original 128-bit choice was set from Quora alone and generalized badly.
 
-## The bits carry meaning
+**Clusters come from asserted edges, not similarity.** Connected components at a
+similarity threshold — the method originally specified — has no usable operating
+point: cos >= 0.60 puts 2018 of 5000 items in one cluster, cos >= 0.70 separates
+co-cited passages 92% of the time. This is at float32, so no bit width fixes it.
+Citation edges alone reached F1 0.755 with a largest cluster of 6. But *unioning* the
+two collapsed purity from 1.000 to 0.009 — the signals are orthogonal, not noisy
+versions of each other.
 
-The 128 LSH bits come from a sentence embedding, not a byte hash. Text goes through
-`all-MiniLM-L6-v2` (384-dim) and is projected to 128 bits by SimHash against fixed
-random hyperplanes. SimHash is the right reduction because the probability that two
-vectors fall on opposite sides of a random hyperplane is `theta/pi` — so Hamming
-distance in the compressed space is an unbiased estimator of angular distance in the
-original. Cosine similarity survives the squeeze.
-
-### How good are the bits?
-
-Measured on **Quora Duplicate Questions** — 1000 human-labeled pairs from the corpus
-BEIR and MTEB use — as recall@1 over 2000 documents: for each question, is its true
-duplicate the nearest neighbour among all 1999 others?
-
-| | recall@1 | of ceiling |
-|---|---|---|
-| float32 cosine (ceiling) | 0.8140 | — |
-| 128-bit LSH | **0.7780** | **95.6%** |
-| 32-bit LSH (previous) | 0.5495 | 67.5% |
-
-The ceiling is what the *embedding model* can do; no compression beats it. At 32 bits
-the code was discarding a third of what MiniLM knew. At 128 it keeps almost all of
-it, and the curve flattens hard after that — 256 bits buys 1.8 more points, 512 buys
-2.9. The remaining headroom is in the model, not the width.
-
-Reproduce with `tools/fetch-corpus.py` then `make eval`.
-
-A note on corpus choice: an earlier version of this benchmark used paraphrase pairs
-written by hand. That measures how separable the author made the examples, not how
-the system performs — it put 32-bit recall@1 at 0.18 against the 0.55 real data
-shows, and would have driven the design toward far more bits than it needs. Use a
-standard corpus.
-
-### Is it semantic at all?
-
-`make check-semantic` is the cheaper guard: paraphrase pairs sharing almost no
-vocabulary must land closer than unrelated ones, with a margin and no overlap.
-Currently 37.8 vs 64.8 mean Hamming distance, 27 bits of separation.
-
-Run `./test/semantic` with no model and it uses a backend named
-`hash_nonsemantic` — separation collapses, the distributions overlap, and the test
-fails. That failure is the point: it is the regression guard against a placeholder
-quietly returning.
-
-## Correctness
-
-Every SIMD kernel has a scalar twin, and `test/differential.c` runs both over random
-input at counts chosen to straddle the SIMD lane boundaries, asserting identical
-results. This matters more than it sounds: a wrong SIMD kernel does not crash, it
-returns a slightly wrong Hamming distance that looks entirely plausible and stays
-wrong forever.
-
-The trit encoding is base-3 rather than two-bits-per-trit. All 3^6 = 729 packed values
-are legal and round-trip; all 64807 remaining 16-bit values are rejected as
-corruption. A 2-bit scheme would waste a quarter of its encoding space on states that
-mean nothing and would silently decode corruption as valid data.
-
-```
-$ make check
-sigil differential tests (SIMD active)
-sizeof(sigil_t) = 48, LSH 128 bits
-  ok   trits: all 729 values round-trip, 64807 corrupt values rejected
-  ok   scan: n=0 ... n=10000
-all passed
-```
+**Model choice is not MTEB rank.** Seven embedding models were compared; the smallest
+and oldest won. What predicts post-SimHash quality is embedding *isotropy* — mean
+|cosine| between unrelated documents — not benchmark position or dimensionality.
 
 ## Build
 
 ```sh
 make                 # libsigil.a
-make check           # differential tests (scalar vs SIMD)
-make check-semantic  # proves the LSH bits are semantic
+make check           # differential tests, scalar vs SIMD
+make check-semantic  # proves the LSH bits carry meaning
 make eval            # retrieval quality on a standard corpus
-make bench           # throughput
+make bench           # single-threaded throughput
+make bench-mt        # threaded, static split vs work pool
 make sbom            # SPDX 2.3 SBOM
 ```
 
-The core library has no third-party dependencies: SHA-1 is implemented in-tree and
-the scalar kernels build anywhere. AVX2 is selected at compile time and probed at
-runtime via CPUID; NEON is the aarch64 baseline so it needs no probe; anything else
-falls back to scalar with `sigil_have_simd()` reporting zero.
+The library vendors BLAKE3 (portable C only) and has no other dependencies. AVX2 and
+SSE4.2 are selected at runtime from cached CPUID probes; NEON is the aarch64 baseline;
+anything else falls back to scalar with `sigil_have_simd()` reporting zero. One binary
+runs everywhere — an earlier version probed for AVX2, ignored the answer, and crashed
+with SIGILL on a 2010 Xeon.
 
-Semantic embeddings need llama.cpp, which is detected at build time and optional. The
-library builds and links without it; `sigil_embedder_llama()` returns NULL and
-`make check-semantic` skips rather than silently passing against the fallback.
+Semantic embeddings need llama.cpp, detected at build time and optional:
 
 ```sh
-# Build llama.cpp, then convert an embedding model:
 python3 llama.cpp/convert_hf_to_gguf.py \
     ~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/*/ \
     --outfile ~/models/all-MiniLM-L6-v2-f16.gguf --outtype f16
@@ -230,59 +168,67 @@ python3 llama.cpp/convert_hf_to_gguf.py \
 make check-semantic LLAMA_DIR=~/llama.cpp MODEL=~/models/all-MiniLM-L6-v2-f16.gguf
 ```
 
-### A caveat on the hyperplane seed
+Without it the library still builds and `make check-semantic` skips rather than
+silently passing against the non-semantic fallback.
 
-The projection is seeded (`SIMHASH_SEED`), and hyperplanes are generated
-deterministically with splitmix64 so two machines produce identical bits. But a
-store's bits are only comparable against the seed *and* embedding width that produced
-them. Changing either invalidates every sigil already written. This wants to be
-recorded in a store header before anything durable is built on it.
+## Correctness
+
+Every SIMD kernel has a scalar twin, and `test/differential.c` runs both over random
+input at counts straddling the lane boundaries, asserting identical results. A wrong
+SIMD kernel does not crash — it returns a slightly wrong Hamming distance that looks
+plausible and stays wrong forever.
+
+`make check-semantic` is the guard against the LSH bits quietly ceasing to be
+semantic. Run `./test/semantic` with no model and it uses a backend named
+`hash_nonsemantic`; separation collapses and the test fails. That failure is the point.
+
+The trit encoding is base-3 rather than two-bits-per-trit: all 729 packed values are
+legal and round-trip, and all 64807 remaining 16-bit values are rejected as
+corruption. A 2-bit scheme would waste a quarter of its encoding space and silently
+decode corruption as valid data.
 
 ## Status
 
-Working: the 48-byte layout with 128-bit LSH, trit packing, the struct-of-arrays
-store, the three scan kernels in scalar, AVX2, and NEON with differential tests
-proving they agree, real semantic embeddings via llama.cpp, and retrieval evaluation
-against a standard corpus. Builds and passes on x86-64 and aarch64.
+Working: the 64-byte layout, BLAKE3 identity, trit packing, the struct-of-arrays
+store, scan kernels in scalar/AVX2/SSE4.2/NEON with differential tests, chunked
+embedding via llama.cpp, and evaluation harnesses for retrieval, clustering, and
+formula hashing. Builds and passes on x86-64 and aarch64.
 
-Not yet built:
+Not built:
 
-- **9P2000 server.** The planned frontend. 9P suits this better than FUSE because the
-  served namespace is yours to define, so a semantic query is a directory walk rather
-  than something smuggled through an ioctl — `/similar/<hex>/` populated by the scan
-  above. Base 9P2000 rather than 9P2000.L: the `.L` extensions exist for POSIX
-  fidelity this does not need, and base 9P2000 talks to Linux v9fs, plan9port, and
-  native Plan 9 alike. The Linux client is already in mainline, so no kernel module is
-  required.
-- **Persistence.** The store is in-memory. A durable format needs to record the
-  embedding model, its width, and the hyperplane seed, since bits made under different
-  parameters are not comparable.
-- **GPU offload.** `bench/scan_opencl.c` shows a resident store scanning 2.9x faster
-  than the best CPU path. Turning that into a backend needs residency management —
-  incremental appends without re-uploading — not just the kernel, which already
-  exists.
-- **Tiered embedding.** One model runs on everything today, at ~470 docs/s. The
-  cheaper design is progressive — a fast sketch on all files, the transformer only on
-  what matters — since embedding now dominates per-file cost by roughly 60x over
-  hashing. INT8 quantization is quality-neutral here (0.7880 vs 0.7880 measured), so
-  NPU or GPU inference costs nothing in retrieval quality.
+- **Persistence.** The store is in-memory. The durable format is libtab (ndb-shaped
+  text), and its `schema=` tuple must record `model_id`, `embed_dim`, `simhash_seed`
+  and `lsh_bits` — a store whose parameters differ is not comparable and must refuse
+  to open rather than return wrong answers.
+- **Indexer.** Nothing walks a directory yet. Only tests create sigils.
+- **9P2000 server.** The planned frontend, so a semantic query is a directory walk
+  rather than something smuggled through an ioctl. Base 9P2000 rather than `.L`: the
+  extensions exist for POSIX fidelity this does not need, and base 9P2000 talks to
+  Linux v9fs, plan9port and native Plan 9 alike.
+- **Clustering and the classifier**, which follow from persistence.
 
-## Findings
+The tools in `tools/` work standalone today, without any of the above:
 
-`docs/FINDINGS.md` records what was measured and what did not work: seven embedding
-models, three projections, whitening, Matryoshka truncation, NPU and GPU offload for
-both embedding and scanning, and the concurrency results that changed several
-conclusions. Most of it is negative results, which are the ones worth writing down.
+```sh
+tools/xlsx_ast.py '=SUM(A1,B1)' '=SUM(B1,A1)'   # same hash: SUM commutes
+tools/math_ast.py                                # LaTeX -> canonical tree hash
+bench/xlsx_eval.py /path/to/spreadsheets 500     # duplicate-formula report
+```
+
+`bench/` holds the measurement scripts behind every number above, including the ones
+that record failures — `cluster_eval.py` demonstrates the clustering that does not
+work, `escalate.py` the cheap discriminator that does not separate.
 
 ## License
 
-GPLv3 or later. Copyleft rather than permissive for two reasons: a kernel module
-would need to be GPL regardless, and the design's value is in the layout idea, which
-is worth keeping open rather than letting it disappear into a closed product.
+GPLv3 or later. Copyleft rather than permissive for two reasons: a kernel module would
+need to be GPL regardless, and the design's value is in the layout idea, which is
+worth keeping open.
 
-## A note on SHA-1
+## A note on hashing
 
-SHA-1 is used here for content identity, not security. Collision resistance against a
-deliberate attacker is not claimed. If that property is ever needed, the hash field
-widens to SHA-256 and the record layout has to be revisited — which is a real design
-constraint, not an oversight.
+BLAKE3 at full 256 bits, not truncated. Truncating to 128 gives a collision
+probability around 1.5e-21 at a billion paragraphs — unreachable by accident, but only
+2^64 work to construct one deliberately. The store is designed assuming someone will
+attack it on purpose for a reason not yet known, and collision resistance cannot be
+retrofitted once stores exist in the wild.
