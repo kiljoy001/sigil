@@ -102,6 +102,29 @@ seed does.
 The schema carries a `federation` field, empty for now, so adding this later
 does not change the format. `factotum` is the natural place for the key.
 
+## Mathematics is an identity channel, not a similarity one
+
+Embeddings do not compare mathematics — they invert. Measured across four
+models, contradictory statements scored consistently *more* similar than
+equivalent ones (see FINDINGS.md). `∀ε∃δ` and `∃ε∀δ` landed 6 bits apart out
+of 128.
+
+So math is excluded from the LSH path entirely. Paragraphs that are mostly math
+should not produce a sigil at all: the vector would be built from connective
+tissue like "where" and "such that", which is noise shaped like signal.
+
+Instead, `tools/math_ast.py` converts LaTeX to Content MathML via LaTeXML,
+canonicalizes the operator tree (commutative operators sorted, unicode
+normalized) and hashes it. Two expressions that canonicalize identically *are*
+the same expression — a fact rather than an estimate. That hash is a graph
+edge: "these two paragraphs contain the same formula." No threshold, no
+possibility of a confident wrong answer.
+
+99.3% parse coverage on real math.stackexchange LaTeX, ~20 ms/expression when
+batched. The technique generalizes: anything with a parseable grammar —
+spreadsheet formulas, source code, chemical structures — can have an exact
+identity channel alongside the prose similarity channel.
+
 ## Encapsulation
 
 Identity underneath, annotations layered above, never mixed.

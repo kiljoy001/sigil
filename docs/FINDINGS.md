@@ -299,6 +299,100 @@ needs to. A 32-token variant is untested and would plausibly help a lot.
 
 ---
 
+## Mathematics: embeddings are inverted, ASTs work
+
+The question was whether a semantic filesystem can compare mathematical
+content. It cannot, by embedding — and the failure is worse than weakness.
+
+### The probe
+
+8 pairs that are mathematically *equivalent* but differ in notation, and 8 that
+share notation but assert *opposite* things. A working similarity measure puts
+the first group close and the second far.
+
+| model | equivalent | confusable | separation |
+|---|---|---|---|
+| MiniLM-L6-v2 (contrastive) | 32.4 | 17.6 | **-14.8** |
+| SciBERT | 25.9 | 10.6 | **-15.2** |
+| MathBERT (tbs17) | 42.5 | 22.6 | **-19.9** |
+| MathBERTa (witiko) | 13.5 | 3.0 | **-10.5** |
+
+Hamming distance out of 128. **Every model is inverted**: contradictions score
+as *more* similar than equivalences. A similarity search over math would
+confidently retrieve the negation of the query.
+
+The individual cases are stark. `∀ε>0 ∃δ>0` vs `∃ε>0 ∀δ>0` — quantifiers
+swapped, meaning inverted — came out **6 bits apart**, the closest pair in the
+set. `A ⊆ B` vs `B ⊆ A`: 11 bits. `O(n log n)` vs `O(n²)`: 12 bits. Meanwhile
+genuinely equivalent phrasings of the same complexity bound sat at 57 bits,
+near random.
+
+### Why
+
+Three of the four are masked-language models (`BertForMaskedLM`,
+`RobertaForMaskedLM`, pipeline tag `fill-mask`), not embedders. Nothing in an
+MLM objective asks that similar sentences land near each other — that is what
+contrastive training does, and it is why Sentence-BERT exists. Mean-pooling an
+MLM gives a vector nobody optimized for cosine similarity.
+
+Domain training made it *worse*, not better. MathBERTa scored cos 0.995 between
+contradictory statements: it has learned that mathematical text looks alike so
+thoroughly it can barely distinguish anything.
+
+Reading the source papers confirms a scope mismatch rather than a bug.
+`tbs17/MathBERT` is built for mathematics *education* — knowledge-component
+prediction, auto-grading student answers, knowledge tracing — on a corpus of
+pre-K-to-college curriculum plus arXiv abstracts. UL-BERT (Cheng et al. 2021)
+classifies formulas into five buckets: Derivative, Integral, Series, Matrix,
+Others. At that granularity `O(n log n)` and `O(n²)` are both "Others". Its own
+error analysis reports the model "may pay too much attention to the subscripts"
+— the same surface-form sensitivity, acknowledged.
+
+The one promising model, Peng et al. (arXiv 2105.00377), trains on Operator
+Trees — and it works precisely to the extent that it stops being distributional
+and starts parsing structure. It appears unreleased.
+
+### What does work: canonicalize and hash
+
+`tools/math_ast.py`. LaTeXML converts LaTeX to Content MathML, which is a real
+semantic AST — `<apply><plus/><ci>x</ci><ci>y</ci></apply>` — then the tree is
+canonicalized (commutative operators sorted, unicode normalized) and hashed.
+
+**16/16 on the same probe.** `x+y` and `y+x` collide by construction; `a<b` and
+`a>b`, `∫_a^b` and `∫_b^a`, `A ⊆ B` and `B ⊆ A` all stay distinct.
+
+Measured on 300 real math.stackexchange expressions:
+
+- **99.3% parse coverage** (2 failures, both malformed `\displaystyle`)
+- **~20 ms/expression batched**, against 631 ms spawning `latexmlmath` per
+  call — a 31x speedup, and the batched path was verified to produce identical
+  hashes
+- 103 of 190 unique hashes appeared more than once, i.e. it genuinely finds
+  duplicate expressions across different posts
+
+The coverage figure was the surprise; the estimate beforehand was 30-50%.
+LaTeXML is what arXiv itself uses to render papers, so it handles real-world
+macros that SymPy's parser does not.
+
+### Consequence for the design
+
+Mathematics gets an **exact-identity channel, not a similarity one**. An
+expression hash is a graph edge: "these two paragraphs contain the same
+formula." No threshold, no embedding, no possibility of a plausible-looking
+wrong answer.
+
+Paragraphs that are mostly math should not produce an LSH sigil at all — the
+vector would be built from connective tissue like "where" and "such that",
+which is noise wearing the shape of signal. Strip math before embedding, hash
+it separately.
+
+The general lesson beyond math: **build a probe with equivalent and confusable
+pairs before trusting a similarity measure in a new domain.** Positive
+separation is not the default, and inversion is invisible without the second
+group.
+
+---
+
 ## Machines
 
 | name | CPU | SIMD | accelerator |
