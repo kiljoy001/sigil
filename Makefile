@@ -38,7 +38,13 @@ TESTS = test/differential test/bench test/bench_mt test/semantic test/eval
 
 CORPUS ?= test/data/corpus.txt
 
-.PHONY: all check check-semantic eval corpus bench bench-mt clean sbom
+# sigilfs is built with plan9port's 9c/9l, not the system compiler: it links
+# lib9p and libtab, both of which want plan9port's libc. libsigil stays plain
+# C11 and dependency-free; store.c is the only file that sees both worlds.
+PLAN9 ?= $(HOME)/Repo/plan9port
+LIBTAB_SRC ?= $(HOME)/Repo/objective-9c/libtab
+
+.PHONY: all check check-semantic eval corpus bench bench-mt clean sbom sigilfs
 
 all: $(LIB)
 
@@ -115,5 +121,16 @@ sbom:
 	./tools/gen-sbom.sh > sbom.spdx.json
 	@echo "wrote sbom.spdx.json"
 
+# Built separately from `all` so a missing plan9port never breaks the library.
+sigilfs:
+	@if [ ! -x "$(PLAN9)/bin/9c" ]; then \
+		echo "need plan9port: set PLAN9=/path/to/plan9port"; exit 1; \
+	fi
+	@if [ ! -d "$(LIBTAB_SRC)" ]; then \
+		echo "need libtab sources: set LIBTAB_SRC=/path/to/libtab"; exit 1; \
+	fi
+	$(MAKE) -C cmd PLAN9=$(PLAN9) LIBTAB_SRC=$(LIBTAB_SRC)
+
 clean:
 	rm -f $(OBJ) $(LIB) $(TESTS)
+	-$(MAKE) -C cmd clean 2>/dev/null || true

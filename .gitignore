@@ -20,3 +20,7 @@ core.*
 # Fetched evaluation corpus (reproduce with tools/fetch-corpus.py)
 test/data/corpus.txt
 test/data/pairs.json
+
+# RKNN converter debug dumps (tools/convert-rknn.py writes these to cwd)
+*.onnx
+!tools/*.py

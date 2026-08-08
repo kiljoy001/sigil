@@ -28,8 +28,9 @@ putting the hash first forced four bytes of interior padding and pushed the reco
 56. BLAKE3's 32 bytes align naturally, so the ordering no longer matters — but the
 assert stays, since the on-disk format depends on it.
 
-**Status: a working library and a body of measurements, not yet an application.**
-There is no persistence, no indexer, and no server — see [Status](#status).
+**Status: a working library, a mountable 9P server skeleton, and a body of
+measurements.** `sigilfs` mounts and answers the protocol, but there is no persistence
+and no indexer yet — see [Status](#status).
 
 ## What is measured
 
@@ -140,6 +141,21 @@ versions of each other.
 and oldest won. What predicts post-SimHash quality is embedding *isotropy* — mean
 |cosine| between unrelated documents — not benchmark position or dimensionality.
 
+## Mounting it
+
+```sh
+make sigilfs PLAN9=/usr/local/plan9      # needs plan9port and libtab
+cmd/sigilfs -s sigil &                   # posts a 9P service
+9pfuse "$NAMESPACE/sigil" /mnt/sigil     # or mount -t 9p
+
+cat /mnt/sigil/stats
+echo 'mount docs /home/me/notes' >> /mnt/sigil/ctl
+```
+
+Use `>>` rather than `>`. 9pfuse encodes the no-change qid on a truncating open in a
+form lib9p rejects before any callback runs, so shell `>` redirection fails with
+ERANGE. `9p write`, `>>` and `dd conv=notrunc` all work.
+
 ## Build
 
 ```sh
@@ -201,10 +217,9 @@ Not built:
   and `lsh_bits` — a store whose parameters differ is not comparable and must refuse
   to open rather than return wrong answers.
 - **Indexer.** Nothing walks a directory yet. Only tests create sigils.
-- **9P2000 server.** The planned frontend, so a semantic query is a directory walk
-  rather than something smuggled through an ioctl. Both dependencies are verified —
-  libtab round-trips under plan9port and a lib9p test server served a live namespace
-  over the protocol. See [`docs/9P-PLAN.md`](docs/9P-PLAN.md).
+- **Indexing and similarity inside the server.** `sigilfs` mounts and serves `/ctl`
+  and `/stats`, but `index` returns "not implemented" and `/similar/` is empty. See
+  [`docs/9P-PLAN.md`](docs/9P-PLAN.md).
 - **Clustering and the classifier**, which follow from persistence.
 
 The tools in `tools/` work standalone today, without any of the above:
