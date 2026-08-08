@@ -152,9 +152,12 @@ cat /mnt/sigil/stats
 echo 'mount docs /home/me/notes' >> /mnt/sigil/ctl
 ```
 
-Use `>>` rather than `>`. 9pfuse encodes the no-change qid on a truncating open in a
-form lib9p rejects before any callback runs, so shell `>` redirection fails with
-ERANGE. `9p write`, `>>` and `dd conv=notrunc` all work.
+Use `>>` rather than `>`. Shell truncation makes v9fs send a `Twstat` to set mtime,
+and 64-bit plan9port rejects every conformant `Twstat` — a `(ulong)` cast applied to a
+32-bit wire field, where `ulong` is 8 bytes. It is not a client bug: plan9port's own
+`nulldir()` + `dirfwstat()` trips it. Diagnosis and one-word fix in
+[`docs/PLAN9PORT-BUG.md`](docs/PLAN9PORT-BUG.md). `>>`, `dd conv=notrunc` and
+`9p write` are unaffected.
 
 ## Build
 

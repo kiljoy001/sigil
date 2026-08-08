@@ -115,6 +115,12 @@ fswstat(Req *r)
 {
     Dir *d = &r->d;
 
+    if(tracing)
+        fprint(2, "TRACE wstat-raw qid.type=%#ux qid.vers=%#lux qid.path=%#llux "
+                  "mode=%#luo mtime=%#lux length=%lld name=%q\n",
+               d->qid.type, d->qid.vers, d->qid.path,
+               d->mode, d->mtime, d->length, d->name ? d->name : "");
+
     if(r->fid->file != fs.ctl){
         tracereq(r, "wstat", "cannot wstat");
         respond(r, "sigilfs: cannot wstat");

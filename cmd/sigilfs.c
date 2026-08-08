@@ -149,12 +149,17 @@ threadmain(int argc, char **argv)
 	fs.srv.open = fsopen;
 	fs.srv.create = fscreate;
 	fs.srv.stat = fsstat;
-	/* Accepts a zero-length truncate on /ctl. Note this does NOT make
-	 * `echo > ctl` work under 9pfuse: 9pfuse encodes the no-change qid as
-	 * 'dalA' rather than all-ones, and lib9p rejects that in swstat before
-	 * any callback runs ("wstat -- attempt to change qid"). Use `>>`, dd
-	 * conv=notrunc, or 9p write. The handler is still correct for clients
-	 * that send a proper wstat. */
+	/* Accepts a zero-length truncate on /ctl.
+	 *
+	 * This handler is never reached on 64-bit plan9port: lib9p rejects
+	 * every conformant Twstat first, because srv.c casts a 32-bit wire
+	 * field through (ulong), which is 8 bytes here. See
+	 * docs/PLAN9PORT-BUG.md -- plan9port's own nulldir()+dirfwstat() trips
+	 * it too, so it is not a client conformance issue.
+	 *
+	 * Consequence: shell `>` redirection onto /ctl fails, because v9fs
+	 * sends a Twstat to set mtime after a truncating open. Use `>>`, dd
+	 * conv=notrunc, or 9p write. */
 	fs.srv.wstat = fswstat;
 
 	if(addr != nil){
