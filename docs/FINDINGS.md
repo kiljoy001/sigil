@@ -533,6 +533,60 @@ here; the CPU path above is what was measured.
 
 ---
 
+## Paragraph retrieval on real papers
+
+6648 paragraphs from 223 arXiv papers, embedded individually. Ground truth is
+weak but real: two paragraphs from the same paper are related.
+
+**The core premise holds.** 128-bit LSH picks a same-paper nearest neighbour
+47.3% of the time against a 0.43% random baseline — 110x chance.
+
+**And it is semantic, not lexical**, which matters given the math result:
+
+| | token overlap | cosine |
+|---|---|---|
+| same-paper | 0.125 | **0.367** |
+| different-paper | 0.090 | 0.084 |
+
+Token overlap barely separates them while cosine separates them 4.4x, and the
+Jaccard/cosine correlation is +0.184 against +0.601 on the math probe. On real
+prose the embedding is doing semantic work. The math failure was domain
+specific, not a general property of the pipeline.
+
+### Bit width is corpus dependent
+
+This was not expected, and it corrects an earlier decision.
+
+| corpus | 128 bits | 256 | 512 | 1024 |
+|---|---|---|---|---|
+| Quora questions | **95.6%** | 98.3% | 98.8% | 99.9% |
+| arXiv paragraphs | **76.8%** | 89.6% | 94.5% | 97.0% |
+
+(percent of that corpus's own float32 ceiling)
+
+Quora saturates at 128. arXiv needs 512 to reach the same place. The mechanism
+is discrimination difficulty: Quora questions span unrelated topics, so a
+coarse code separates them, while paragraphs from 223 papers in adjacent fields
+are genuinely similar and distinguishing them needs finer resolution.
+
+Marginal gains on arXiv: 128->256 buys 7.7 points, and everything from 256 to
+1536 combined buys 5.5. The single doubling is worth more than the next three.
+
+**Consequence:** `SIGIL_LSH_BITS` belongs in the store schema next to
+`model_id` and `simhash_seed`, not fixed in the header. The 128-bit choice was
+set from Quora alone and the header comment claiming "the remaining headroom is
+in the model, not the width" is true only for that corpus. 256 is the better
+default: 89.6% on the hard corpus, 98.3% on the easy one, 32 bytes per record.
+
+### A llama.cpp gotcha worth recording
+
+`llama-embedding` reading from **stdin concatenates every line into one
+document** and returns a single vector. With `-f file` it splits on newlines as
+documented. This silently produced 6650 vectors for 6648 paragraphs and would
+have corrupted every number here. Always assert the returned count.
+
+---
+
 ## Machines
 
 | name | CPU | SIMD | accelerator |
