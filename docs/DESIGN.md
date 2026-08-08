@@ -125,6 +125,29 @@ batched. The technique generalizes: anything with a parseable grammar —
 spreadsheet formulas, source code, chemical structures — can have an exact
 identity channel alongside the prose similarity channel.
 
+## LSH width belongs in the store, not the header
+
+Measured on three corpora, the number of bits a corpus needs varies widely:
+
+| corpus | 128 bits | 256 | 512 |
+|---|---|---|---|
+| Quora questions | 95.6% | 98.3% | 98.8% |
+| arXiv paragraphs | 76.8% | 89.6% | 94.5% |
+| citation contexts | 57.3% | 73.7% | 87.9% |
+
+(percent of that corpus's own float32 ceiling)
+
+Discrimination difficulty is what differs. Short questions on unrelated topics
+separate under a coarse code; dense academic prose where neighbours are
+genuinely similar needs finer resolution.
+
+So `SIGIL_LSH_BITS` is a per-store parameter recorded in the schema beside
+`model_id`, `embed_dim` and `simhash_seed` — same class of thing, and a store
+whose width does not match the running configuration must refuse to open.
+Default 256; 512 for dense technical corpora.
+
+The original 128-bit choice was set from Quora alone and generalized badly.
+
 ## Encapsulation
 
 Identity underneath, annotations layered above, never mixed.

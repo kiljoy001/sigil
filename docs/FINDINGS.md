@@ -553,6 +553,39 @@ Jaccard/cosine correlation is +0.184 against +0.601 on the math probe. On real
 prose the embedding is doing semantic work. The math failure was domain
 specific, not a general property of the pipeline.
 
+### Retrieval against peer-reviewed judgement
+
+The strongest evidence in the project, because it is the only measurement
+against an *external* human standard rather than an internal property.
+
+Ground truth without annotation: two paragraphs citing the same work were
+written by domain experts who each independently decided that work was relevant
+there, and reviewers agreed. Those judgements already exist in the literature —
+no labelling budget, no reinforcement loop, no scale problem.
+
+5000 citation contexts citing 951 distinct works, from unarXive. Citation
+markers stripped so "[16]" cannot act as a lexical giveaway. Chance is 0.09%.
+
+| method | R@1 | R@5 | vs chance |
+|---|---|---|---|
+| random | 0.0009 | 0.0045 | 1x |
+| **float32 cosine** | **0.2754** | **0.5362** | **305x** |
+| 512-bit LSH | 0.2420 | 0.4794 | 268x |
+| 256-bit LSH | 0.2030 | 0.4320 | 225x |
+| 128-bit LSH | 0.1578 | 0.3524 | 175x |
+
+R@5 = 0.54 at the ceiling: given a passage, more than half the time one of its
+five nearest neighbours engages with the same prior work — written by different
+authors, in different papers, who never coordinated.
+
+It is a hard test. Citation contexts are terse ("following [16]") while the
+passages they parallel are detailed and differently worded.
+
+**This is a lower bound on precision.** Citations are sparse and biased —
+authors cite a handful of relevant works, chosen partly by visibility and field
+norms — so a non-citation is not evidence of non-relatedness. Many apparent
+misses are genuinely related passages that were simply not co-cited.
+
 ### Bit width is corpus dependent
 
 This was not expected, and it corrects an earlier decision.
@@ -561,8 +594,13 @@ This was not expected, and it corrects an earlier decision.
 |---|---|---|---|---|
 | Quora questions | **95.6%** | 98.3% | 98.8% | 99.9% |
 | arXiv paragraphs | **76.8%** | 89.6% | 94.5% | 97.0% |
+| citation contexts | **57.3%** | 73.7% | 87.9% | — |
 
 (percent of that corpus's own float32 ceiling)
+
+Three independent corpora, same pattern. Citation contexts are the hardest —
+dense academic prose where the distinctions are fine — and 128 bits retains
+barely half of what the embedding knows.
 
 Quora saturates at 128. arXiv needs 512 to reach the same place. The mechanism
 is discrimination difficulty: Quora questions span unrelated topics, so a
