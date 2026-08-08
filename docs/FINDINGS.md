@@ -778,35 +778,54 @@ released through litigation — is the test.
 
 `tools/xlsx_ast.py` tokenizes a formula, canonicalizes it (absolute markers
 normalized, case folded, commutative functions sorted) and hashes the tree.
-Measured on 300 workbooks, 1.59 million formulas:
+Measured on 2998 workbooks, 4.7 million formulas:
 
 | | LaTeX via LaTeXML | Excel |
 |---|---|---|
-| parse coverage | 99.3% | **100.00%** |
-| speed | ~20 ms/expression | **0.04 ms/formula** |
+| parse coverage | 99.3% | **99.9999%** |
+| speed | ~20 ms/expression | **0.05 ms/formula** |
+| failures | ~2 in 300 | **6 in 4,713,827** |
 
-500x faster and complete. But the first attempt scored **66%**, not 100 — the
-grammar was missing named ranges (`CBalancingVol`) and error values (`#REF!`).
-Those were gaps in the tokenizer, not in Excel. Prediction from "the grammar is
-closed" was right about the destination and wrong about the first attempt,
-which is now the fourth time this project has needed a measurement to correct
-an inference.
+400x faster and effectively complete. (9,700 further cells contain a bare `=`
+with nothing after it — broken cells, not formulas, and excluded from the
+denominator.)
+
+Getting there took three corrections, all gaps in the tokenizer rather than in
+Excel:
+
+1. **66%** — named ranges (`CBalancingVol`) were unrecognized
+2. **99.66%** — sheet-qualified error refs (`'ASSUM 1'!#REF!`)
+3. **99.9999%** — a greedy character class made `=#REF!/0.75` swallow the `/0`;
+   fixed by anchoring to the known error literals
+
+Predicting from "the grammar is closed" was right about where this lands and
+wrong about every intermediate step. That is the fourth inference this project
+has needed a measurement to correct.
 
 ### Duplicated logic is real and abundant
 
-From 300 workbooks: **97,977 distinct computations appear in more than one
-workbook.** The most-shared reach 46 files:
-
-```
-46 workbooks  =VLOOKUP(G11,DDENA_USERS,2,FALSE)
-46 workbooks  =SUMIF($T$19:$T$5002,A6,$S$19:$S$5002)
-46 workbooks  =COUNTIF($T$19:$T$5001,A6)
-```
+From 2998 workbooks: **510,457 distinct computations appear in more than one
+workbook**, out of 1.24 million distinct hashes.
 
 The obvious objection — that these are the same file saved repeatedly — does
-not hold: all 300 files are byte-distinct, zero exact duplicates. These are
-different workbooks sharing computations, which is copy-paste sprawl made
-visible.
+not hold: a content-hash check over 300 files found zero exact duplicates.
+These are different workbooks sharing computations.
+
+The most-shared entries reveal something more useful than copy-paste:
+
+```
+732 workbooks  =NOW()
+279 workbooks  ='[1]Data Sheet'!B11
+279 workbooks  ='[1]Data Sheet'!C11
+```
+
+`'[1]Data Sheet'!` is an **external workbook reference**. 279 files pull from
+one source: that is not duplication, it is a dependency graph. Change that
+sheet and 279 workbooks move with it.
+
+"Here is what breaks if you touch this" is a stronger claim than "here are your
+duplicates", and it needs no similarity at all — the edge is explicit in the
+formula text.
 
 ### Why spreadsheets suit this better than papers
 
