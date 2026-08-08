@@ -374,6 +374,69 @@ The coverage figure was the surprise; the estimate beforehand was 30-50%.
 LaTeXML is what arXiv itself uses to render papers, so it handles real-world
 macros that SymPy's parser does not.
 
+### The inversion is in the embedding, not the hash
+
+Worth locating precisely, because the obvious suspect is wrong. SimHash and
+Hamming distance are not at fault: the raw float cosine is *already* inverted
+before any hashing happens, under every pooling strategy tried.
+
+| pooling | cosine separation | Hamming separation |
+|---|---|---|
+| mean | -0.116 | -13.2 |
+| last | -0.154 | -15.6 |
+| max | -0.046 | -7.5 |
+| cls | +0.004 | -0.8 |
+| concat first+last | -0.087 | -5.5 |
+| position-weighted | -0.102 | -11.1 |
+
+Hamming separation tracks cosine separation across all six, which is what an
+unbiased estimator should do. The compression is faithful; it is faithfully
+reporting an inversion it did not create. (`cls` is the least inverted only
+because it collapses everything to ~0.91 and distinguishes nothing.)
+
+### The mechanism: the embedding is substantially bag-of-tokens
+
+Comparing token-multiset overlap (Jaccard over the tokenizer's output) against
+cosine explains the whole result:
+
+| | mean Jaccard | mean cosine |
+|---|---|---|
+| equivalent pairs | 0.252 | 0.743 |
+| confusable pairs | **0.757** | **0.859** |
+
+**Correlation between token overlap and cosine: +0.601.**
+
+The two starkest cases have Jaccard exactly 1.000 — identical token multisets,
+pure permutations:
+
+- `∀ε>0 ∃δ>0` vs `∃ε>0 ∀δ>0` → cosine 0.971
+- `A ⊆ B` vs `B ⊆ A` → cosine 0.970
+
+A permutation reads as the same thing. Mean pooling is a commutative operation,
+and while attention is supposed to inject order through positional encodings,
+for short expressions built from the same symbols the pooled vector comes out
+nearly unchanged. The model has little reason to encode which quantifier binds
+first, because that distinction rarely mattered in its training data.
+
+So the probe was guaranteed to invert: equivalent pairs were written with
+*different notation* (low overlap by construction) and confusable pairs with
+*the same notation* (high overlap). A model tracking token overlap must get
+this backwards. It is doing what it was trained to do.
+
+### This generalizes past mathematics
+
+Any domain where meaning turns on order, or on a single negating token, will
+fail the same way:
+
+- legal text — "shall" vs "shall not", party order in an obligation
+- code — `>` vs `>=`, argument order, `if` vs `unless`
+- clinical text — dosage direction, "with" vs "without" contrast
+
+**Cheap pre-flight test for a new domain:** compute Jaccard token overlap and
+cosine over a sample of pairs and correlate them. A high correlation means the
+embedding is largely doing lexical matching, and any semantic claim over that
+corpus is unsafe. No labels needed.
+
 ### Consequence for the design
 
 Mathematics gets an **exact-identity channel, not a similarity one**. An
