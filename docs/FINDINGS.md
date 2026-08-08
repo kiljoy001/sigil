@@ -456,6 +456,83 @@ group.
 
 ---
 
+## Two-stage retrieval: what can act as the discriminator
+
+Given that contradictions score as similar (above), the natural fix is a second
+stage: scan cheaply, then verify the candidates. That only works if stage two
+can tell the two apart. Two candidates were tested.
+
+### A cheap lexical trigger does not work
+
+The idea: flag pairs that are *both* close in Hamming distance *and* high in
+token overlap, since that is the measured signature of the failure.
+
+On constructed pairs it looked excellent — 11/13 contradictions caught, zero
+false alarms. On 400 human-labeled Quora duplicates it collapsed:
+
+| Jaccard threshold | contradictions caught | false alarms on real duplicates |
+|---|---|---|
+| 0.55 | 7/10 | **38.2%** |
+| 0.65 | 6/10 | 23.2% |
+| 0.75 | 1/10 | 12.8% |
+| 0.95 | 1/10 | 0.0% |
+
+The distributions overlap almost completely. Contradiction Jaccards run
+0.50-1.00; genuine duplicates have median 0.50, p90 0.778, p99 0.917. Most
+contradictions sit between 0.6 and 0.75 — exactly where the bulk of real
+paraphrases sit. No threshold separates them.
+
+The constructed prose pairs had mean Jaccard 0.066 because they were written to
+be lexically distinct. Real paraphrases average 0.510: people restate things
+using mostly the same words. **This is the same error as the hand-written
+corpus earlier — examples invented to demonstrate a hypothesis will
+demonstrate it.**
+
+### A weak LLM does work, but the prompt dominates
+
+Llama-3.2-3B-Instruct via llama-server, judging the same pairs:
+
+| prompt | contradictions | duplicates | balanced accuracy |
+|---|---|---|---|
+| "same thing or contradict?" | 10/10 | 0/15 | 50.0% |
+| "does B contradict A?" | 0/10 | 15/15 | 50.0% |
+| **4-shot with examples** | **10/10** | **11/15** | **86.7%** |
+
+The first two are degenerate: they answer one way regardless of input. Both
+score 100% on one class, which looks like success until the other class is
+checked. Four labelled examples turn it into a real classifier.
+
+Validated on a larger sample: 46/60 real duplicates correctly called
+PARAPHRASE (76.7%), 30/30 unrelated pairs correctly rejected (100%), at ~350 ms
+per call on CPU.
+
+**Always measure both error classes.** A discriminator scoring 10/10 on
+contradictions was not reading the input at all.
+
+### Cost
+
+The second stage is affordable because the scan does the reduction first. A
+similarity scan over 10M records returns on the order of 100 candidates, so the
+LLM runs on ~0.001% of the corpus. At 350 ms per pair that is 35 seconds,
+against a scan measured in milliseconds. Total cost stays dominated by the
+scan.
+
+This improves **precision** on retrieved candidates. It cannot improve
+**recall**: genuinely equivalent paragraphs with different vocabulary (Jaccard
+~0.25) are missed by the scan and never reach stage two. That is the harder
+problem and none of this touches it.
+
+### NPU note
+
+Generative inference on the RK3588 NPU needs **RKLLM**, a separate stack from
+the RKNN used for the embedder — different runtime, different conversion
+toolchain, its own model zoo. It supports RK3588 and small instruct models
+(Qwen3.5, SmolLM3, Gemma4, MiniCPM4), and its server demo speaks an
+OpenAI-compatible API, so the classifier can stay backend-agnostic. Untested
+here; the CPU path above is what was measured.
+
+---
+
 ## Machines
 
 | name | CPU | SIMD | accelerator |
