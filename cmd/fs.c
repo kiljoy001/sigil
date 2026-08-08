@@ -30,6 +30,7 @@ statstext(Sigilfs *f)
 		"scans\t%llud\n"
 		"store\t%s\n"
 		"model\t%s\n"
+		"embedder\t%s\n"
 		"embed_dim\t%d\n"
 		"lsh_bits\t%d\n"
 		"simhash_seed\t%llux\n"
@@ -39,6 +40,8 @@ statstext(Sigilfs *f)
 		f->nrecords, f->nscans,
 		f->storepath ? f->storepath : "(memory)",
 		f->model_id ? f->model_id : "(none)",
+		br_have_embedder(f->store) ? "loaded"
+		    : "NONE -- lsh bits are a byte hash, not semantic",
 		f->embed_dim, f->lsh_bits, f->simhash_seed,
 		f->nindexed, f->thresh,
 		f->nmounts);

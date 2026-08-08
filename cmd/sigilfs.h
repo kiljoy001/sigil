@@ -36,6 +36,7 @@ struct Sigilfs {
 	File *similar;
 
 	char *storepath;  /* libtab file, nil = in-memory only */
+	char *modelpath;  /* GGUF, nil = no embedder (bits are not semantic) */
 	void *store;      /* opaque sigil_store_t*, see store.c */
 
 	Mount *mounts;    /* linked list; small and rarely walked */
@@ -102,5 +103,8 @@ int br_hash(void *b, long i, char *out, unsigned long outlen);
 int br_lsh_hex(void *b, long i, char *out, unsigned long outlen);
 long br_find_hash(void *b, const char *hexhash);
 long br_similar(void *b, long i, unsigned maxdist, unsigned *out, long maxout);
+int br_embedder_load(void *b, const char *gguf, uvlong seed);
+int br_have_embedder(void *b);
+unsigned br_embed_dim(void *b);
 
 #endif /* SIGILFS_H */

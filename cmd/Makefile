@@ -21,6 +21,16 @@ OBJ  = $(SRC:.c=.o) bridge.o
 
 SIGIL_ROOT = ..
 
+# libsigil.a carries the llama.cpp embedder when built with SIGIL_WITH_LLAMA,
+# so sigilfs needs those shared objects at link time. Leave LLAMA_DIR unset to
+# build without an embedder: records then get the byte-shingle fallback, which
+# is not semantic, and /stats says so.
+LLAMA_DIR ?= $(HOME)/llama.cpp
+ifneq ($(wildcard $(LLAMA_DIR)/build/bin/libllama.so),)
+  LLAMA_LIBS = -L$(LLAMA_DIR)/build/bin -lllama -lggml -lggml-base \
+               -Wl,-rpath,$(LLAMA_DIR)/build/bin -lstdc++ -lm
+endif
+
 TABSRC = $(wildcard $(LIBTAB_SRC)/*.c) $(MONOCYPHER)/monocypher.c
 TABOBJ = $(notdir $(TABSRC:.c=.o))
 
@@ -28,7 +38,7 @@ all: sigilfs
 
 sigilfs: $(OBJ) libtab.a $(SIGIL_ROOT)/libsigil.a
 	$(LD9) -o $@ $(OBJ) libtab.a $(SIGIL_ROOT)/libsigil.a \
-		-l9p -l9pclient -lthread
+		-l9p -l9pclient -lthread $(LLAMA_LIBS)
 
 # System compiler, C11, no plan9port headers.
 bridge.o: bridge.c $(SIGIL_ROOT)/include/sigil.h

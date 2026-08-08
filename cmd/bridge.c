@@ -14,6 +14,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "sigil.h"
+#include "sigil_embed.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,13 @@ struct bridge {
 	char **paths;        /* [cap] parallel to store rows */
 	unsigned *paras;
 	size_t n, cap;
+
+	/* Optional. Without it, records carry the byte-shingle fallback, which
+	 * is not semantic -- so the server reports whether an embedder is
+	 * loaded rather than letting a caller assume the bits mean something. */
+	sigil_embedder_t *emb;
+	sigil_simhash_t sh;
+	int have_sh;
 };
 
 void *
@@ -48,6 +56,49 @@ br_new(void)
 	return b;
 }
 
+/*
+ * Load an embedding model. Returns 0 on success. The hyperplane seed must
+ * match whatever produced any store being loaded alongside it: bits projected
+ * through different hyperplanes are not comparable, which is why the store
+ * records the seed and refuses a mismatch.
+ */
+int
+br_embedder_load(void *p, const char *gguf, unsigned long long seed)
+{
+	struct bridge *b = p;
+
+	if (b == NULL || gguf == NULL)
+		return -1;
+	if (b->emb != NULL)
+		return 0;                        /* already loaded */
+	b->emb = sigil_embedder_llama(gguf);
+	if (b->emb == NULL)
+		return -1;
+	if (sigil_simhash_init(&b->sh, b->emb->dim(b->emb), seed) != 0) {
+		b->emb->destroy(b->emb);
+		b->emb = NULL;
+		return -1;
+	}
+	b->have_sh = 1;
+	return 0;
+}
+
+int
+br_have_embedder(void *p)
+{
+	struct bridge *b = p;
+
+	return (b != NULL && b->emb != NULL) ? 1 : 0;
+}
+
+unsigned
+br_embed_dim(void *p)
+{
+	struct bridge *b = p;
+
+	return (b == NULL || b->emb == NULL) ? 0 : (unsigned)b->emb->dim(b->emb);
+}
+
 void
 br_free(void *p)
 {
@@ -56,6 +107,10 @@ br_free(void *p)
 
 	if (b == NULL)
 		return;
+	if (b->have_sh)
+		sigil_simhash_free(&b->sh);
+	if (b->emb != NULL)
+		b->emb->destroy(b->emb);
 	for (i = 0; i < b->n; i++)
 		free(b->paths[i]);
 	free(b->paths);
@@ -100,9 +155,24 @@ br_add(void *p, const char *path, unsigned para, const void *text, size_t len,
 		return -1;
 
 	sigil_generate_para(text, len, para, timestamp, 0, NULL, &s);
-	if (lsh != NULL)
+
+	if (lsh != NULL) {
 		for (i = 0; i < SIGIL_LSH_WORDS; i++)
 			s.lsh[i] = lsh[i];
+	} else if (b->emb != NULL) {
+		/* Real semantic bits. Failure here leaves the byte-shingle
+		 * fallback in place rather than dropping the record: a
+		 * paragraph that will not embed is still worth addressing by
+		 * content, it just will not be found by similarity. */
+		size_t dim = b->emb->dim(b->emb);
+		float *v = malloc(dim * sizeof *v);
+
+		if (v != NULL) {
+			if (b->emb->embed(b->emb, (const char *)text, len, v) == 0)
+				sigil_simhash_project(&b->sh, v, s.lsh);
+			free(v);
+		}
+	}
 
 	if (sigil_store_push(&b->st, &s) < 0)
 		return -1;

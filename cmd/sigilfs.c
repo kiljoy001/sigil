@@ -34,7 +34,7 @@ static void
 usage(void)
 {
 	fprint(2, "usage: sigilfs [-DL] [-s srvname] [-m mtpt] "
-	          "[-a tcp!*!port] [-f store.tab]\n");
+	          "[-a tcp!*!port] [-f store.tab] [-e model.gguf]\n");
 	threadexitsall("usage");
 }
 
@@ -114,6 +114,7 @@ threadmain(int argc, char **argv)
 	char *mtpt = nil;
 	char *store = nil;
 	char *addr = nil;
+	char *model = nil;
 	char *err;
 
 	ARGBEGIN{
@@ -132,6 +133,9 @@ threadmain(int argc, char **argv)
 	case 'a':
 		addr = EARGF(usage());
 		break;
+	case 'e':
+		model = EARGF(usage());
+		break;
 	case 'f':
 		store = EARGF(usage());
 		break;
@@ -143,6 +147,14 @@ threadmain(int argc, char **argv)
 		usage();
 
 	sigilfs_init(&fs, store);
+
+	/* Load the model before the store, so a mismatch is caught against a
+	 * live embedder rather than after records are already in memory. */
+	if(model != nil){
+		fs.modelpath = estrdup9p(model);
+		if(br_embedder_load(fs.store, model, fs.simhash_seed) != 0)
+			sysfatal("cannot load model %s", model);
+	}
 
 	/* Load before serving: a client that attaches mid-load would see a
 	 * partial store and get wrong answers from a scan. Refusing to start
