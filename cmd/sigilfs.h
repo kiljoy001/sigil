@@ -57,10 +57,19 @@ struct Sigilfs {
 /* sigilfs.c */
 extern Sigilfs fs;
 
+/* trace.c -- diagnostic log of every request and its outcome.
+ * Enabled with -L; writes to stderr. Distinct from -D (lib9p's chatty9p),
+ * which dumps wire messages but not which callback produced an error. */
+extern int tracing;
+void tracereq(Req *r, char *what, char *err);
+
 /* fs.c -- 9P callbacks */
 void fsread(Req *r);
 void fswrite(Req *r);
 void fswstat(Req *r);
+void fsopen(Req *r);
+void fscreate(Req *r);
+void fsstat(Req *r);
 
 /* ctl.c -- parse and apply a line written to /ctl */
 char *ctlwrite(Sigilfs *f, char *line);

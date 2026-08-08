@@ -10,7 +10,7 @@ MONOCYPHER ?= $(HOME)/Repo/objective-9c
 CC9 = $(PLAN9)/bin/9c
 LD9 = $(PLAN9)/bin/9l
 
-SRC  = sigilfs.c fs.c ctl.c store.c
+SRC  = sigilfs.c fs.c ctl.c store.c trace.c
 OBJ  = $(SRC:.c=.o)
 
 TABSRC = $(wildcard $(LIBTAB_SRC)/*.c) $(MONOCYPHER)/monocypher.c
