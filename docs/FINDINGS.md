@@ -842,6 +842,108 @@ two sea novels land in different classes by the author's nationality.
 
 Averaging the two into one number would have hidden this entirely.
 
+### Two OpenVINO pipelines on one GPU corrupt each other
+
+A batch judging run and a diagnostic script were both given `GPU.1`. The batch
+run's output turned to noise:
+
+```
+'ofi建华 +=\n``Slfapsedでしょうね...'
+'SetColor life，天才.SelectedItems。初喜...'
+```
+
+Mixed CJK, code fragments, no relation to the input — indistinguishable from
+the `<pad>` garbage llama.cpp produces on this card, and easy to misread as the
+same hardware fault. It is not. With the second process killed, the identical
+prompt returned a clean `UNRELATED` reproducibly, and `The capital of France
+is` returned `Paris.`
+
+The 100 pairs judged during the overlap were discarded. Nothing warns about
+this: both processes compile and run, and only the output is wrong.
+
+**Serialise GPU access.** One OpenVINO pipeline per device at a time, and check
+for a running job before starting anything that touches the GPU — including a
+"quick" diagnostic.
+
+### Prompting the judge: four attempts, and what each one broke
+
+The judge prompt went through four versions before it produced usable output.
+Recorded because the failures were not obvious in advance and two of them look
+like successes if you check only one thing.
+
+**1. Zero-shot yes/no.** `SAME` or `DIFFERENT`. Answered DIFFERENT for five of
+six hand-written probes — coherent and reading, but the threshold sat in the
+wrong place.
+
+**2. Few-shot yes/no.** Four hand-written example pairs. Scored 6/6 on probes,
+then collapsed to **89.4% UNRELATED** on real paragraphs. The examples were
+one-sentence fragments where the positives were near-paraphrases and the
+negatives wildly disjoint, so the demonstrated boundary was "almost the same
+sentence" versus "nothing in common". Real Victorian prose falls in between.
+
+**3. Ask for shared subjects** (the user's formulation): *"compare these two
+blocks of text, return a list of subjects these blocks share, if no relation
+can be determined return UNRELATED"*. Immediately better — naming the subjects
+forces a reason rather than a default. But it accepted `["chestnut"]`, `face`
+and `he (the male subject)` as shared subjects. Those are shared *words*, and
+SimHash is most sensitive to exactly that, so counting them measures the LSH
+against itself.
+
+**4. Adding explicit prohibitions broke it again.** A `Do NOT list:` block
+naming the failure modes pushed the model into blanket refusal — the Hastings
+pair that had produced `Norman conquest, Harold, William` came back
+`UNRELATED`. Negative instructions re-created the conservative collapse of
+version 1.
+
+**What works:** define the subject positively and filter afterwards.
+
+```
+Return a list of subjects the two blocks share. A subject is what a passage
+is ABOUT -- a topic, event, place, field, activity, or theme that a librarian
+would use to catalogue it, not merely a word that appears in both.
+```
+
+with a post-filter dropping generic categories and bare short tokens. The
+Hastings pair now returns `duke william, battle of hastings, norman conquest`,
+and the two cookbook paragraphs correctly return nothing.
+
+The general lesson, consistent with `bench/llm_judge.py`: tell the model what
+you want, not what you forbid, and enforce the rest in code where it cannot
+suppress the signal along with the noise.
+
+### The catalogue is the weaker judge, and asking for subjects shows it
+
+The rerank result below was measured with a yes/no prompt. Replacing it with
+*"compare these two blocks of text, return a list of subjects these blocks
+share, and if no relation can be determined return UNRELATED"* changed the
+behaviour completely — and revealed that the disagreements are mostly the
+ground truth's fault, not the model's.
+
+Two paragraphs on the Battle of Hastings, one from a volume of narrative
+history and one from a travel book about the roads out of Hastings:
+
+> **judge:** Duke William, Battle, England, Norman conquest, Harold
+> **catalogue:** miss — filed `world history` and `cathedrals`/`england`
+
+Two English cookbooks, both filed `cooking, english`:
+
+> "Zante currants are not a currant really, but a small kind of grape"
+> "You may make white curran wine the same way, only leave out the rasps"
+> **judge:** UNRELATED
+> **catalogue:** hit
+
+In both directions the judge is the more accurate of the two. LCSH headings
+describe *where a book sits on a shelf*; the question being asked is whether
+*these two paragraphs* are about the same thing. A judge that answers the
+second question precisely gets marked wrong by a label that only answers the
+first.
+
+Two consequences. Asking for the shared subjects rather than a verdict forces
+the model to commit to a reason instead of defaulting to no — which is what the
+89.4% UNRELATED below really was. And the rerank R@k figure cannot settle
+whether the judge helps, because it grades a paragraph-level judgement against
+a book-level label.
+
 ### LLM reranking does not pay for itself here
 
 The escalation architecture — cheap wide scan, expensive narrow judge — applied

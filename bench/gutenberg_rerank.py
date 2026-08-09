@@ -53,46 +53,95 @@ JUDGE_MODEL = os.environ.get(
     "SIGIL_JUDGE", "/mnt/bulk/models/openvino/qwen2.5-7b-int8")
 JUDGE_DEVICE = os.environ.get("SIGIL_JUDGE_DEVICE", "GPU.1")
 
-# Few-shot, and not optionally so. Zero-shot with the same 7B model answered
-# DIFFERENT for five of six probe pairs -- coherent, reading, and useless,
-# because the threshold sat in the wrong place. Four examples moved it to 6/6
-# on both error classes. bench/llm_judge.py found the same thing on Quora with
-# a different model: framing dominates, and a classifier that answers one way
-# regardless of input looks fine if only one error class is measured.
+# Ask for the shared subjects, not a yes/no verdict.
 #
-# The examples deliberately include a same-topic/different-register pair and a
-# shared-vocabulary/different-subject pair, because those are the two cases the
-# Hamming scan gets wrong. A judge that cannot separate them adds nothing where
-# it matters.
-PROMPT = """Decide whether two passages concern related subject matter. \
-They count as RELATED if they touch the same topic, event, place, or field, \
-even in different styles or from different angles.
+# The previous prompt asked "are these related, RELATED or UNRELATED" and got
+# UNRELATED for 89.4% of real pairs after scoring 6/6 on hand-written probes.
+# Three things were wrong with it, and all three are structural:
+#
+#   * Its four few-shot examples were one-sentence fragments, while the real
+#     inputs are up to 700 characters of Victorian prose. The demonstrated task
+#     did not resemble the actual one.
+#   * Both positive examples were near-paraphrases and both negatives were
+#     wildly disjoint, so the demonstrated boundary was "almost the same
+#     sentence" versus "nothing in common". Everything real fell in between,
+#     where the model defaulted to no.
+#   * It asked the wrong question. The score is whether two *books* share an
+#     LCSH facet at depth 1 -- coarse, e.g. both tagged "united states". A
+#     Revolution history and an Ohio travel guide count as a hit. Asking
+#     whether the *passages* are topically related is far stricter, so the
+#     judge could be right and still be scored wrong.
+#
+# Naming the shared subjects forces the model to commit to a reason rather than
+# fall back on a default, and it produces output directly comparable to the
+# subject headings the catalogue assigns -- the same units the metric uses.
+# Extract, then compare. Asking for the main idea of each block first, and only
+# then for what they share, is what finally produced a judge that neither
+# defaults to UNRELATED nor accepts shared vocabulary as a shared subject.
+#
+# Why it works where a direct question did not: summarising each block on its
+# own forces the model to read both before deciding anything, and a passing
+# mention like "chestnut" does not survive into a one-sentence summary. The
+# earlier prompts asked for the comparison directly, which let the model answer
+# from surface overlap or fall back on a default without ever engaging the text.
+#
+# The rigid output format matters as much as the framing -- an open-ended
+# "extract the main ideas and compare them" produced good extractions and then
+# ran out of tokens before reaching a verdict.
+PROMPT = """Extract the main idea of each text block, then compare them.
 
-A: The harvest failed and the village went hungry that winter.
-B: Crop yields collapsed across the region, and famine followed.
-Answer: RELATED
+Block 1:
+{a}
 
-A: The clock struck three in the empty hall.
-B: Copper exports rose steadily under the new tariff.
-Answer: UNRELATED
+Block 2:
+{b}
 
-A: He tightened the rigging as the gale rose.
-B: Seamanship in heavy weather was the making of a crew.
-Answer: RELATED
+Answer in exactly this format:
+IDEA 1: <one sentence>
+IDEA 2: <one sentence>
+SHARED: <the subjects both blocks are about, comma separated, or NONE>
 
-A: The doctrine of the trinity was disputed by early councils.
-B: The delegates argued past midnight over grain prices.
-Answer: UNRELATED
+IDEA 1:"""
 
-A: {a}
-B: {b}
-Answer:"""
+# Rejected as subjects regardless of what the model returns. The exclusions in
+# the prompt cut most of it, but a 7B model still occasionally answers with a
+# bare noun, and those verdicts are the ones that would corrupt the result:
+# SimHash is most sensitive to exactly the shared vocabulary they represent, so
+# counting them measures the LSH against itself.
+GENERIC = {"people", "time", "description", "nature", "life", "man", "men",
+           "woman", "women", "he", "she", "it", "they", "things", "place",
+           "places", "day", "world", "work", "way", "words", "text", "none",
+           "unrelated", "n/a", "nothing", "human", "humans", "person",
+           "emotion", "emotions", "feeling", "feelings", "action", "actions",
+           "object", "objects", "event", "events", "subject", "subjects"}
+
+
+def clean_subjects(items):
+    """Drop bare tokens and generic categories.
+
+    A shared subject has to be a topic. The first run accepted ["chestnut"],
+    "face" and "he (the male subject)" as shared subjects -- shared words, not
+    shared topics -- and those inflate the measured separation for a reason
+    that has nothing to do with meaning.
+    """
+    out = []
+    for t in items:
+        t = t.strip(" -*.\"'[]\t").lower()
+        if not t or t in GENERIC:
+            continue
+        # No length rule here. An earlier version rejected any single word
+        # under 8 characters, which discarded "battle" and "currants" --
+        # correct answers -- and helped drive the related rate to 0.2%.
+        # Extracting the main idea first already excludes passing mentions,
+        # so this only has to catch the true generics.
+        out.append(t)
+    return out
 
 _pipe = None
 
 
-def judge(a, b):
-    """RELATED / UNRELATED / None.
+def judge(a, b, return_text=False):
+    """Shared subjects as a list, or None when the model says UNRELATED.
 
     llama.cpp cannot host this model on an Arc GPU -- it garbles output above
     ~4B parameters on both its SYCL and Vulkan backends. OpenVINO runs the same
@@ -102,12 +151,18 @@ def judge(a, b):
     if _pipe is None:
         import openvino_genai
         _pipe = openvino_genai.LLMPipeline(JUDGE_MODEL, JUDGE_DEVICE)
-    out = _pipe.generate(PROMPT.format(a=a[:700], b=b[:700]),
-                         max_new_tokens=4).strip().upper()
-    if "UNRELATED" in out:
-        return "UNRELATED"
-    if "RELATED" in out:
-        return "RELATED"
+    # Two one-sentence summaries plus a verdict line needs ~110 tokens; at 48
+    # the model ran out mid-summary and never emitted SHARED at all.
+    raw = _pipe.generate(PROMPT.format(a=a[:700], b=b[:700]),
+                         max_new_tokens=110).strip()
+    if return_text:
+        return raw
+    for line in raw.splitlines():
+        if line.strip().upper().startswith("SHARED"):
+            v = line.split(":", 1)[-1].strip()
+            if not v or v.upper().startswith(("NONE", "UNRELATED")):
+                return None
+            return clean_subjects(v.split(",")) or None
     return None
 
 
@@ -146,6 +201,7 @@ def main():
     base = {k: 0 for k in Ks}
     rerank = {k: 0 for k in Ks}
     verdicts = collections.Counter()
+    shared_subjects = collections.Counter()
     n_calls = 0
     t0 = time.time()
 
@@ -165,13 +221,15 @@ def main():
         # Reranked order: RELATED first (scan order preserved within each group),
         # then unjudged, then DIFFERENT. A stable partition, not a re-scoring --
         # the model gives a label, not a number, so there is nothing to sort by.
-        same, unk, diff = [], [], []
+        same, diff = [], []
         for pos, j in enumerate(cand):
             v = judge(texts[i], texts[j])
             n_calls += 1
-            verdicts[v] += 1
-            (same if v == "RELATED" else diff if v == "UNRELATED" else unk).append(pos)
-        order = same + unk + diff
+            verdicts["shared" if v else "UNRELATED"] += 1
+            if v:
+                shared_subjects.update(v)
+            (same if v else diff).append(pos)
+        order = same + diff
         rr = [rel[p] for p in order]
         for k in Ks:
             if any(rr[:k]):
@@ -198,6 +256,11 @@ def main():
     print(f"\nverdict distribution over {tot} calls:")
     for v, c in verdicts.most_common():
         print(f"  {str(v):10s} {c:6d}  {100*c/tot:5.1f}%")
+    if shared_subjects:
+        print("\nmost frequent shared subjects named by the judge:")
+        for sub, c in shared_subjects.most_common(12):
+            print(f"  {c:4d}  {sub[:64]}")
+
     top = max(verdicts.values()) / tot if tot else 1.0
     if top > 0.90:
         print("\nWARNING: the judge answered one way >90% of the time. "
