@@ -842,6 +842,60 @@ two sea novels land in different classes by the author's nationality.
 
 Averaging the two into one number would have hidden this entirely.
 
+### Classification: judged edges, then a consolidated label
+
+2000 pairs judged with the extract-then-compare prompt, stratified across the
+whole Hamming range:
+
+| | separation |
+|---|---|
+| split by the judge's verdict | **+14.7 bits** |
+| split by the catalogue label | +9.0 bits |
+
+451 confirmed related (22.6%), and confirmation decays monotonically:
+
+| Hamming | n | confirmed |
+|---|---|---|
+| 0–60 | 27 | 55.6% |
+| 60–70 | 242 | 38.8% |
+| 70–80 | 525 | 30.5% |
+| 80–90 | 498 | 21.7% |
+| 90–100 | 244 | 18.0% |
+| 100–110 | 97 | 5.2% |
+| 110–120 | 139 | 10.1% |
+| 120+ | 228 | 4.8% |
+
+Distance predicts the verdict, and it predicts a *read* judgement better than
+it predicts shelving. Catalogue/judge agreement is 76.2%.
+
+**Pass one's vocabulary is unusable on its own.** 451 edges produced 551
+distinct subject strings, 383 appearing exactly once. `war`, `battle`,
+`combat`, `conflict`, `victory` and `expedition` are six groups that should be
+one, and no amount of counting merges them — they share no substring.
+
+**Pass two consolidates in one call.** Given the top 60 subjects it returned:
+
+```
+THEME: Military & Conflict | war, battle, combat, conflict, victory, expedition, danger, death
+THEME: Religion & Philosophy | religion, god, philosophy, church, consciousness, truth
+THEME: Emotions & Human Experience | love, loneliness, fear, grief, happiness, compassion
+THEME: Literature & Poetry | poetry, literature, tennyson, malory, plato
+```
+
+Overlapping membership falls out without being engineered: `trees`, `forest`,
+`danger` and `expedition` each land in two themes, and `combat` in both
+Military and Crime. That is the intended behaviour — a passage is about several
+things at once, and forcing a partition is what broke threshold clustering.
+
+Cost is the point. Pass one is one call per pair; pass two is **one call per
+batch of 60 subjects**, a few hundred tokens. The layer doing the most
+valuable reasoning is nearly free.
+
+Two defects at this stage: the model returned ten themes against a stated limit
+of five, and used `THEME: INCOHERENT | diggingory` as a junk drawer —
+hallucinating `diggingory` from `diggory`, a character name that should never
+have survived pass one as a subject.
+
 ### Two OpenVINO pipelines on one GPU corrupt each other
 
 A batch judging run and a diagnostic script were both given `GPU.1`. The batch

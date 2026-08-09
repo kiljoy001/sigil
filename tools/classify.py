@@ -45,28 +45,32 @@ import json
 import os
 import sys
 
-import numpy as np
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 RADIUS = 90          # Hamming, of 256 bits
 MAX_PAIRS_PER_SEED = 20
 
-# Pass two. Deliberately allowed to split: even inside the radius ~15% of edges
-# are judge-rejected, so a block can hold more than one theme, and saying so is
-# more useful than forcing a single wrong label onto it.
-GROUP_PROMPT = """These subject labels were extracted from a group of \
-passages that a similarity index placed together.
+# Pass two consolidates. Pass one produces one group per subject string, and
+# the vocabulary is long-tailed -- 233 confirmed edges yielded 336 distinct
+# strings, 256 of them appearing exactly once. `war`, `battle` and `expedition`
+# are three groups that should be one; `souls`, `consciousness` and `religion`
+# likewise. Reading the whole list at once is what lets the model see that,
+# which is precisely what counting string frequencies cannot do.
+#
+# A subject may belong to more than one theme, and that is not an error --
+# overlapping membership is the point. Groups are not a partition.
+GROUP_PROMPT = """These subject labels were extracted from passages that a \
+similarity index placed near each other.
 
 Subjects:
 {subjects}
 
-Identify the coherent themes. Answer in exactly this format, one line per \
-theme, at most three:
+Group them into coherent themes. A subject may belong to more than one theme. \
+Answer in exactly this format, one line per theme, at most five:
 THEME: <short name> | <the subjects belonging to it, comma separated>
 
-If the subjects do not form any coherent theme, answer exactly:
-INCOHERENT
+If none of the subjects form any coherent theme, answer with the single word \
+INCOHERENT and nothing else. Do not use INCOHERENT as a theme name.
 
 THEME:"""
 
@@ -92,83 +96,116 @@ def pass1(store, judge, seeds, radius=RADIUS, max_pairs=MAX_PAIRS_PER_SEED,
 
 
 def blocks_from_edges(edges):
-    """Connected components over judge-confirmed edges only.
+    """Group by subject, with overlapping membership.
 
     Pass one must persist the pair indices, not just the verdict. The first
     measurement run stored `{d, llm, subs}` and dropped `(i, j)`, which makes
     the edge set ungroupable -- every confirmed pair becomes its own block of
     two. Obvious in hindsight, invisible until the graph is built.
 
-    Components over *similarity* edges chain badly -- that is the measurement
-    that killed threshold clustering. Restricting to confirmed edges is what
-    makes components defensible here, and pass two can still split a block that
-    chained through a bridging passage.
+    Not connected components, and not a partition. A passage about Napoleon's
+    retreat belongs under war *and* russia *and* winter; forcing it into one
+    group is the assumption that broke threshold clustering, because a single
+    bridging passage then merges two topics permanently and irreversibly.
+
+    Letting a paragraph appear in every group it has a judged edge into makes a
+    bridge merely a member of both, which is what it actually is. That is also
+    how the namespace wants to behave -- a file under several directories is
+    ordinary in Plan 9, and union mounts do exactly this.
+
+    So the unit here is the subject, not the component: each confirmed edge
+    files both of its endpoints under every subject the judge named for it.
     """
-    parent = {}
-
-    def find(x):
-        parent.setdefault(x, x)
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
-    for i, j, _, _ in edges:
-        union(i, j)
-
     groups = collections.defaultdict(lambda: {"members": set(),
-                                              "subjects": collections.Counter()})
+                                              "subjects": collections.Counter(),
+                                              "edges": 0})
     for i, j, _, subs in edges:
-        g = groups[find(i)]
-        g["members"].update((i, j))
         for s in subs:
-            g["subjects"][s] += 1
+            g = groups[s]
+            g["members"].update((i, j))
+            g["edges"] += 1
+            for s2 in subs:
+                g["subjects"][s2] += 1
     return groups
 
 
-def pass2(groups, generate, min_size=2):
-    """Name each block from its distilled subject list.
+def pass2(groups, generate, min_size=2, batch=60):
+    """Consolidate the per-subject groups into named themes.
 
-    One call per block over a few hundred tokens, against pass one's call per
-    pair. The model sees every subject in the block at once, which is what lets
-    it recognise related terms as a single theme.
+    One call per batch of subjects -- a few hundred tokens -- against pass
+    one's call per pair. Cheap enough that the layer doing the most valuable
+    reasoning costs almost nothing.
+
+    Returns themes, each carrying every paragraph filed under any of its
+    subjects. A paragraph appears in as many themes as it has judged edges
+    into, which is the intended behaviour: a passage on Napoleon's retreat is
+    genuinely about war and russia and winter at once.
     """
-    out = []
-    for root, g in groups.items():
-        if len(g["members"]) < min_size:
-            continue
-        # Distilled: unique subjects, most frequent first, not the raw edges.
-        listing = ", ".join(s for s, _ in g["subjects"].most_common(40))
+    ranked = sorted(groups.items(), key=lambda kv: -len(kv[1]["members"]))
+    live = [(s, g) for s, g in ranked if len(g["members"]) >= min_size]
+    if not live:
+        return []
+
+    themes = []
+    for start in range(0, len(live), batch):
+        chunk = live[start:start + batch]
+        listing = ", ".join(s for s, _ in chunk)
         raw = generate(GROUP_PROMPT.format(subjects=listing))
-        themes = []
         for line in ("THEME:" + raw).splitlines():
             line = line.strip()
             if line.upper().startswith("INCOHERENT"):
-                themes = []
                 break
-            if line.upper().startswith("THEME:"):
-                body = line.split(":", 1)[-1]
-                name, _, subs = body.partition("|")
-                if name.strip():
-                    themes.append({
-                        "name": name.strip().lower(),
-                        "subjects": [s.strip().lower()
-                                     for s in subs.split(",") if s.strip()],
-                    })
-        out.append({
-            "root": root,
-            "members": sorted(g["members"]),
-            "size": len(g["members"]),
-            "themes": themes[:3],
-            "coherent": bool(themes),
-            "top_subjects": [s for s, _ in g["subjects"].most_common(10)],
-        })
-    return sorted(out, key=lambda x: -x["size"])
+            if not line.upper().startswith("THEME:"):
+                continue
+            name, _, subs = line.split(":", 1)[-1].partition("|")
+            name = name.strip().lower()
+            subjects = [s.strip().lower() for s in subs.split(",") if s.strip()]
+            if not name or not subjects or name.startswith("incoherent"):
+                continue
+            members = set()
+            matched = []
+            for s in subjects:
+                if s in groups:
+                    members.update(groups[s]["members"])
+                    matched.append(s)
+            if len(themes) >= 5 * (start // batch + 1):
+                break       # the stated cap is advisory; enforce it here
+            if members:
+                themes.append({
+                    "name": name,
+                    "subjects": matched,
+                    "members": sorted(members),
+                    "size": len(members),
+                })
+
+    # A subject the model dropped still has members; keep it as its own theme
+    # rather than silently losing those paragraphs.
+    claimed = {s for t in themes for s in t["subjects"]}
+    for s, g in live:
+        if s not in claimed:
+            themes.append({"name": s, "subjects": [s],
+                           "members": sorted(g["members"]),
+                           "size": len(g["members"])})
+    return sorted(themes, key=lambda t: -t["size"])
+
+
+def make_generate(model=None, device=None):
+    """Text completion from the same OpenVINO pipeline pass one judges with.
+
+    Only one pipeline may hold the GPU at a time -- two concurrent OpenVINO
+    processes on one device produce mutually corrupted output with no warning,
+    so pass two must not run while pass one is still judging.
+    """
+    import openvino_genai
+
+    model = model or os.environ.get(
+        "SIGIL_JUDGE", "/mnt/bulk/models/openvino/qwen2.5-7b-int8")
+    device = device or os.environ.get("SIGIL_JUDGE_DEVICE", "GPU.1")
+    pipe = openvino_genai.LLMPipeline(model, device)
+
+    def generate(prompt, max_new_tokens=300):
+        return pipe.generate(prompt, max_new_tokens=max_new_tokens)
+    return generate
 
 
 def main():
@@ -183,8 +220,7 @@ def main():
     print(f"{len(edges)} confirmed edges -> {len(groups)} blocks",
           file=sys.stderr)
 
-    from gutenberg_rerank_bridge import generate  # noqa: F401
-    result = pass2(groups, generate, args.min_size)
+    result = pass2(groups, make_generate(), args.min_size)
 
     coherent = sum(1 for r in result if r["coherent"])
     print(f"{len(result)} blocks of size >= {args.min_size}, "
