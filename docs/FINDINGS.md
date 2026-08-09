@@ -778,37 +778,36 @@ kernel does not crash, it returns a plausible distance and stays wrong.
 
 Written once in SYCL (`src/scan_sycl.cpp`), 10M records, threshold 50:
 
-| kernel | time | vs hand SIMD |
+| kernel | threads | time |
 |---|---|---|
-| **hand-written AVX2** | **9.31 ms** | 1.00x |
-| SYCL on Arc Pro B50 | 18.55 ms | 0.50x |
-| SYCL on CPU | 20.75 ms | 0.45x |
-| scalar C | 20.82 ms | 0.45x |
+| **SYCL, host USM** | all | **2.33 ms** |
+| hand SIMD + work pool | 16 | 2.15 ms |
+| hand-written AVX2 | 1 | 9.31 ms |
+| SYCL, device USM + copy | all | 20.75 ms |
+| scalar C | 1 | 20.82 ms |
 
-Both SYCL paths returned results bit-identical to the scalar reference, so the
-portability claim holds: one source, correct on CPU and GPU.
+Results are bit-identical to the scalar reference, so the portability claim
+holds: one source, correct on CPU and GPU.
 
-The performance claim does not. **SYCL on CPU landed within noise of plain
-scalar C** -- the popcount loop was not vectorised, and the hand-written
-intrinsics are 2.2x faster than what the compiler produced from the same
-algorithm. On the GPU it is the PCIe transfer again, the same finding as the
-earlier OpenCL kernel: 160 MB of LSH crosses the bus per scan, and no kernel
-speed recovers that for a store that does not live on the device.
+**The performance claim holds too, but only with host USM.** The first version
+of this benchmark called `malloc_device` and `memcpy` unconditionally, which on
+CPU copies memory to itself -- 20.75 ms, indistinguishable from scalar, and it
+looked like the compiler had failed to vectorise. It had not. Removing the copy
+gives 2.33 ms: SYCL vectorises the popcount *and* spreads it across all cores,
+matching a hand-written AVX2 kernel driven by a work pool to within 8%, from a
+quarter of the code and with no threading logic at all.
 
-Caveat on the measurement: the kernel allocates device memory and copies even
-in the CPU case, which host USM would avoid. That inflates the CPU number
-somewhat -- but landing exactly on scalar timing points at the kernel body, not
-the copy.
+The lesson is about the benchmark, not the toolchain. A measurement that makes
+a mature compiler look like it emits scalar code is more likely to be wrong
+than the compiler.
 
-The useful conclusion is not "oneAPI is bad". It is that SYCL earns its place
-for **devices with no hand-written path** -- NPUs, future accelerators -- while
-the existing intrinsics stay where they already win. A 9P device server does
-not care which is underneath, which is the point of putting the composition
-layer there rather than in the programming model.
+On the GPU it remains the PCIe transfer -- 18.55 ms, the same wall the earlier
+OpenCL kernel hit at 160 MB of LSH per scan. That is a data-residency problem,
+not a kernel problem.
 
-Worth keeping in proportion: at 9.31 ms for 10M records the scan is already
-near memory bandwidth. Embedding the corpus is ~30 hours. Effort spent on the
-scan is optimising the wrong end by four orders of magnitude.
+Worth keeping in proportion: at ~2.2 ms for 10M records the scan is at memory
+bandwidth by either route. Embedding the corpus is ~30 hours. Effort spent on
+the scan is optimising the wrong end by four orders of magnitude.
 
 ---
 
