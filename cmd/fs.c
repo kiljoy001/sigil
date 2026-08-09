@@ -61,7 +61,7 @@ fsread(Req *r)
 		/* Reading /ctl reports the verbs it accepts, so the interface
 		 * is discoverable with cat rather than documentation. */
 		readstr(r, "mount <name> <root>\nindex [<name>]\n"
-		           "thresh <n>\ncommit\n");
+		           "similar <hex>\nthresh <n>\ncommit\n");
 		tracereq(r, "read", nil);
 		respond(r, nil);
 		return;
@@ -70,6 +70,11 @@ fsread(Req *r)
 		readstr(r, statstext(&fs));
 		tracereq(r, "read", nil);
 		respond(r, nil);
+		return;
+	}
+	if(similar_isleaf(f)){
+		similar_read(r);
+		tracereq(r, "read", nil);
 		return;
 	}
 	tracereq(r, "read", "no read for this file");

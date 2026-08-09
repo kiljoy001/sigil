@@ -100,17 +100,36 @@ oneline(Sigilfs *f, char *line)
 		return dothresh(f, argc, argv);
 	if(strcmp(argv[0], "index") == 0){
 		Mount *m;
+		char *err;
 
+		/* Indexing adds records, so every materialized neighbourhood was
+		 * computed against a store that no longer exists. A stale
+		 * directory that still lists the old results is worse than one
+		 * that has to be rebuilt. */
 		if(argc == 1){
 			char *err = nil;
 			for(m = f->mounts; m != nil; m = m->next)
 				if((err = index_mount(f, m)) != nil)
 					return err;
+			similar_flush(f);
 			return nil;
 		}
 		if((m = mountfind(f, argv[1])) == nil)
 			return "index: no such mount";
-		return index_mount(f, m);
+		err = index_mount(f, m);
+		similar_flush(f);
+		return err;
+	}
+	if(strcmp(argv[0], "similar") == 0){
+		File *dir;
+
+		/* Materialize a neighbourhood. A scan is real work, so it is an
+		 * explicit verb rather than a side effect of walking -- a shell
+		 * completing a path stats a directory several times, and none of
+		 * those should launch a pass over the store. */
+		if(argc != 2)
+			return "usage: similar <hex>";
+		return similar_walk(f, argv[1], &dir);
 	}
 	if(strcmp(argv[0], "commit") == 0)
 		return store_commit(f);

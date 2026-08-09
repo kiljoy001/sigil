@@ -23,11 +23,19 @@
  * the hardest corpus tested. See docs/FINDINGS.md. */
 enum {
 	Defaultdim  = 384,
-	Defaultbits = 256,
-	/* Hamming radius for /similar. Paraphrases measured around 38 bits
-	 * apart at 128 bits and unrelated text around 65; scaled to 256 this
-	 * is a deliberately tight default. */
-	Defaultthresh = 60,
+	/* Hamming radius for /similar, as a percentage of the code width.
+	 *
+	 * A fixed radius is wrong because the useful distance scales with the
+	 * number of bits: 60 is a tight default at 256 bits and admits half
+	 * the store at 128. On a 141-record 128-bit store, 60 returned 71
+	 * neighbours where 45 returned 5.
+	 *
+	 * 35% of the width. Unrelated text lands near half the width by
+	 * construction -- SimHash codes of independent vectors disagree on
+	 * about half their bits -- so this sits well inside that, and the
+	 * judged-pair measurement in docs/FINDINGS.md put the useful radius at
+	 * 90 of 256 bits, which is 35%. */
+	Threshpercent = 35,
 };
 
 void
@@ -37,9 +45,9 @@ sigilfs_init(Sigilfs *f, char *storepath)
 	f->storepath = storepath ? estrdup9p(storepath) : nil;
 	f->model_id = estrdup9p("all-MiniLM-L6-v2");
 	f->embed_dim = Defaultdim;
-	f->lsh_bits = Defaultbits;
+	f->lsh_bits = (int)br_lsh_bits();
 	f->simhash_seed = 0x5191c0de5191c0deULL;
-	f->thresh = Defaultthresh;
+	f->thresh = (f->lsh_bits * Threshpercent) / 100;
 	f->store = br_new();
 	if(f->store == nil)
 		sysfatal("br_new: out of memory");

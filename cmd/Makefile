@@ -16,7 +16,7 @@ LD9 = $(PLAN9)/bin/9l
 # which is the only file that sees libsigil: plan9port's libc.h and C11's
 # stdint.h define the same typedefs and collide, so the two worlds meet
 # through plain-typed functions and an opaque pointer.
-SRC  = sigilfs.c fs.c ctl.c store.c trace.c persist.c index.c
+SRC  = sigilfs.c fs.c ctl.c store.c trace.c persist.c index.c similar.c
 OBJ  = $(SRC:.c=.o) bridge.o
 
 SIGIL_ROOT = ..

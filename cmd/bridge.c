@@ -182,6 +182,16 @@ br_add(void *p, const char *path, unsigned para, const void *text, size_t len,
 	return (long)(b->n - 1);
 }
 
+/* The one authority on the code width. cmd/ cannot include sigil.h, so
+ * store.c had a hardcoded 256 that did not match SIGIL_LSH_BITS -- and that
+ * value is written into the persisted parameters as the guarantee that two
+ * stores are comparable. It was recording a width the data did not have. */
+unsigned
+br_lsh_bits(void)
+{
+	return SIGIL_LSH_BITS;
+}
+
 long
 br_count(void *p)
 {

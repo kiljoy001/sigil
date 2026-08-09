@@ -85,6 +85,12 @@ void sigilfs_init(Sigilfs *f, char *storepath);
 char *store_load(Sigilfs *f);
 char *store_commit(Sigilfs *f);
 
+/* similar.c -- the /similar/<hex>/ projection */
+char *similar_walk(Sigilfs *f, char *hex, File **out);
+int   similar_isleaf(File *f);
+void  similar_read(Req *r);
+void  similar_flush(Sigilfs *f);
+
 /* index.c -- walk a mount and add paragraph records */
 char *index_mount(Sigilfs *f, Mount *m);
 
@@ -106,5 +112,6 @@ long br_similar(void *b, long i, unsigned maxdist, unsigned *out, long maxout);
 int br_embedder_load(void *b, const char *gguf, uvlong seed);
 int br_have_embedder(void *b);
 unsigned br_embed_dim(void *b);
+unsigned br_lsh_bits(void);
 
 #endif /* SIGILFS_H */
