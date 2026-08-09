@@ -769,6 +769,189 @@ have corrupted every number here. Always assert the returned count.
 
 ---
 
+## Project Gutenberg: retrieval against library cataloguing
+
+A fourth corpus, and the first at a scale where the store stops being a
+formality: ~900 paragraphs per book across 61,458 English texts projects to
+**~55M paragraphs, a 3.5 GB store**.
+
+Gutenberg has no citation graph, so the external judgement is the **Library of
+Congress subject headings** in the catalogue. A cataloguer decided two books
+are about the same thing, without reference to any embedding — the property
+that made the unarXive result credible.
+
+### The catalogue's date field is unusable
+
+`Issued` ranges 1971–2026. It is the **digitisation date**, not publication —
+archive bookkeeping. Populating the record's timestamp from it would have been
+silently wrong.
+
+Author death year is the honest substitute: it bounds composition from above,
+covers **84.6%** of paragraphs, and spans **1321–1968**. A proxy, not a fact.
+
+### How coarse the subject relation has to be
+
+LCSH headings are `--`-delimited facets. Matching depth was measured on 210
+books, not chosen:
+
+| depth | scoreable queries | random-pair match |
+|---|---|---|
+| **1** | **99.4%** | **2.26%** |
+| 2 | 6.9% | 1.05% |
+| 3 | 6.7% | 1.02% |
+| exact | 5.3% | 1.02% |
+
+Past one facet, headings are so specific that almost no two books share one and
+93% of queries become unscoreable, leaving a metric computed on an
+unrepresentative remainder. Depth 1 is loose — "United States" joins a
+Revolutionary War history to a travel guide — but chance is 2.26%, so there is
+real headroom above it.
+
+### Results
+
+20,000 paragraphs sampled across 210 books, 1052 scoreable queries:
+
+| method | R@1 | R@5 | R@10 | R@20 |
+|---|---|---|---|---|
+| float32 | 0.199 | 0.369 | 0.469 | 0.587 |
+| 512-bit | 0.182 | 0.355 | 0.471 | 0.590 |
+| 256-bit | 0.183 | 0.345 | 0.447 | 0.557 |
+| 128-bit | 0.130 | 0.295 | 0.416 | 0.542 |
+
+R@1 of 0.199 against 0.0226 chance is **8.8x**. Retained fraction of the
+float32 ceiling — 65.6% / 92.3% / 91.4% at R@1 for 128 / 256 / 512 bits —
+reproduces the bit-width finding on a third independent corpus, landing between
+Quora and citation contexts as dense literary prose should.
+
+### The control matters more than the result
+
+Same-author rate among neighbours, R@1: **0.091** against a subject-match rate
+of 0.199. Subject matching runs ~2x style matching, so the embedder is not
+merely recognising prose voice. Without this control the headline number would
+not be evidence of anything.
+
+### Literature and non-fiction are different tasks
+
+R@10, float32: **literature 0.347, non-fiction 0.635.**
+
+Two reasons, both predicted before measuring. Most paragraphs of a novel are
+dialogue, scene-setting or transition, and are not "about" the book's subject
+headings in any useful sense. And the literature classes divide by *national
+tradition* rather than subject — PS is American, PR English, PQ Romance — so
+two sea novels land in different classes by the author's nationality.
+
+Averaging the two into one number would have hidden this entirely.
+
+### LLM reranking does not pay for itself here
+
+The escalation architecture — cheap wide scan, expensive narrow judge — applied
+to Gutenberg with a 7B judge (Qwen2.5-7B-Instruct, INT8, OpenVINO on the Arc).
+60 queries, top 15 candidates each, 895 judge calls at 519 ms:
+
+| | R@1 | R@5 | R@10 |
+|---|---|---|---|
+| 256-bit scan | 0.133 | 0.267 | 0.350 |
+| + LLM rerank | 0.150 | 0.267 | 0.350 |
+| delta | +0.017 | +0.000 | +0.000 |
+
+Essentially nothing, for ~7.8 s of GPU time per query.
+
+The verdict distribution says why: **89.4% UNRELATED**, a hair under the 90%
+degeneracy threshold the harness warns at. The same model and prompt scored
+6/6 on both error classes against hand-written probe pairs, then collapsed to
+near-constant on real text. The few-shot examples were crisp topical pairs;
+real Gutenberg paragraphs are dialogue, scene-setting and transition, where
+"related subject" is genuinely ambiguous and the model defaults to no.
+
+This is the same effect the corpus already showed from the other direction —
+literature retrieves at 0.37 against non-fiction's 0.63 because most paragraphs
+of a novel are not *about* the novel's subject. A judge asked whether two such
+paragraphs share a subject is being asked a question the text does not answer.
+
+Worth noting what would have hidden this: measuring only the flattering error
+class. A judge answering UNRELATED to everything cannot reorder anything, so
+its R@k *equals* the scan's — which reads as "no harm done" rather than "the
+model is not discriminating." The distribution check is what caught it.
+
+Not a refutation of escalation in general; the citation corpus has sharper
+labels and the judge may earn its cost there. But on per-paragraph prose with
+per-book labels, the cheap tier is already doing the work.
+
+### Practical notes
+
+**The same text ships up to five times** — several encodings plus superseded
+revisions under `old/`. Indexing all of them fills the store with paragraphs
+that are identical by construction and inflates every similarity score. One
+file per `Text#`, preferring UTF-8.
+
+**Sample across books, not by truncation.** The extract is ordered by
+`text_id`, so a head-slice of 20,000 rows drew from **10 books** and left 86% of
+queries unscoreable. Round-robin across books gave 210 books and 70% scoreable.
+Third time this project has been bitten by an unrepresentative sample.
+
+**Embedding is the bottleneck, by three orders of magnitude.** ollama serving
+all-MiniLM on the Arc Pro B50 sustains **188 paragraphs/s**, so the full corpus
+is **~81 hours** of GPU time. The scan over the resulting 3.5 GB store is
+~12 ms. Any argument about scan performance is irrelevant next to this.
+
+**Intel Arc: llama.cpp is the wrong runtime, OpenVINO is the right one.**
+
+On an Arc Pro B50 (Battlemage), llama.cpp produces coherent output only up to
+about 4B parameters, then degrades into noise:
+
+| model | size | output for "The capital of France is" |
+|---|---|---|
+| llama3.2:1b | 1B | `Paris` |
+| phi3:mini | 3.8B | `Paris` |
+| qwen2.5-coder:7b | 7B | `"C" that they have` |
+| gemma3:12b | 12B | `Kijkademadóizevp` |
+
+This is not a configuration problem, and three explanations were wrong before
+the right one: it is not batch size, not concurrency, and not memory pressure
+(it persists at 10 GB loaded with a 4096 context on a 16 GB card). It is a
+known llama.cpp defect on Arc, present on **both** backends —
+[#20169](https://github.com/ggml-org/llama.cpp/issues/20169) for SYCL, closed
+*not planned*, and [#24560](https://github.com/ggml-org/llama.cpp/issues/24560)
+/ [#21888](https://github.com/ggml-org/llama.cpp/issues/21888) for Vulkan.
+Rebuilding the local SYCL tree would have reproduced the same failure through a
+different path.
+
+OpenVINO 2026.3 is a `pip install` away, enumerates the card directly as
+`GPU.1`, and needs no oneAPI environment at all:
+
+```
+GPU.1: Intel(R) Arc(TM) Pro B50 Graphics (dGPU)
+```
+
+MiniLM converted to OpenVINO IR, 64 paragraphs padded to 256 tokens:
+
+| backend | rate | 55M paragraphs |
+|---|---|---|
+| ollama / Vulkan | 188/s | 81 h |
+| **OpenVINO / Arc** | **451/s** | **34 h** |
+| OpenVINO / CPU | 96/s | 159 h |
+
+2.4x ollama on the same hardware and the same weights, with correct output
+(384 dims, unit norm). Dynamic padding on real paragraphs should improve on
+this further.
+
+**`llama-embedding` could not do the job here.** Built without GPU support it
+runs on the CPU, and it aborts partway through this corpus:
+
+```
+ggml/src/ggml-cpu/ops.cpp:5009: GGML_ASSERT(i01 >= 0 && i01 < ne01) failed
+```
+
+ollama serves the same weights on the GPU without it. Separately, ollama's
+`all-minilm` has a **256-token context and rejects longer input outright**
+(`{"error":"the input length exceeds the context length"}`) rather than
+truncating — so long paragraphs must be chunked and pooled, as
+`tools/embed_chunked.py` already does. Three wrong explanations were tried
+first (batch size, then concurrency, then load); the server's own error message
+settled it immediately. Ask the server before theorising.
+
+---
+
 ## Spreadsheets: the identity channel transfers, and better
 
 The math AST work established that anything with a parseable grammar can have
