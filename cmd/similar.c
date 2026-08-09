@@ -197,23 +197,43 @@ similar_read(Req *r)
 {
 	File *f = r->fid->file;
 	Leaf *l = f->aux;
-	char hdr[512];
 	const char *path;
-	char *buf;
-	int n;
+	char *buf, *text;
+	ulong off, len;
+	int n, fd, got;
 
 	path = br_path(fs.store, l->index);
-	n = snprint(hdr, sizeof hdr, "path\t%s\npara\t%ud\n\n",
-	            path != nil ? path : "(unknown)",
-	            br_para(fs.store, l->index));
+	off = br_offset(fs.store, l->index);
+	len = br_length(fs.store, l->index);
 
-	/* Text is not held in the store -- only the sigil is -- so the header
-	 * is what we can serve without re-reading the source file. Reading the
-	 * paragraph back from disk belongs here once the indexer records byte
-	 * offsets; until then say so rather than return an empty file. */
-	buf = emalloc9p(n + 64);
-	memmove(buf, hdr, n);
-	n += snprint(buf + n, 64, "(text not stored; reindex with offsets)\n");
+	/* The store holds the sigil, not the text -- 64 bytes per paragraph is
+	 * the entire point of the layout, and caching the prose alongside it
+	 * would multiply the store by fifty. The paragraph is re-read from its
+	 * source at the recorded offset instead.
+	 *
+	 * A record restored from libtab has no offset (length 0): persistence
+	 * replays sigils whose source file may since have moved or changed,
+	 * and serving text from a stale offset would be worse than serving
+	 * none. Say so rather than return plausible wrong bytes. */
+	buf = emalloc9p(len + 512);
+	n = snprint(buf, 512, "path\t%s\npara\t%ud\noffset\t%lud\nlength\t%lud\n\n",
+	            path != nil ? path : "(unknown)",
+	            br_para(fs.store, l->index), off, len);
+
+	if(len == 0 || path == nil || path[0] == '\0'){
+		n += snprint(buf + n, 128,
+		             "(no offset recorded; reindex to read the text)\n");
+	}else if((fd = open(path, OREAD)) < 0){
+		n += snprint(buf + n, 256, "(cannot open %s: %r)\n", path);
+	}else{
+		text = buf + n;
+		if(seek(fd, off, 0) < 0 || (got = readn(fd, text, len)) <= 0)
+			n += snprint(buf + n, 128, "(cannot read at offset)\n");
+		else
+			n += got;
+		close(fd);
+	}
+
 	readbuf(r, buf, n);
 	free(buf);
 	respond(r, nil);

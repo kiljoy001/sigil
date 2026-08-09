@@ -101,7 +101,15 @@ void *br_new(void);
 void br_free(void *b);
 long br_add(void *b, const char *path, unsigned para, const void *text,
             unsigned long len, const unsigned long long *lsh, unsigned ts);
+long br_add_at(void *b, const char *path, unsigned para, const void *text,
+               unsigned long len, const unsigned long long *lsh, unsigned ts,
+               unsigned long off);
+unsigned long br_offset(void *b, long i);
+unsigned long br_length(void *b, long i);
 long br_add_hex(void *b, const char *path, unsigned para, const char *lshhex);
+long br_add_restore(void *b, const char *path, unsigned para,
+                    const char *lshhex, const char *hashhex,
+                    unsigned long off, unsigned long len);
 long br_count(void *b);
 const char *br_path(void *b, long i);
 unsigned br_para(void *b, long i);

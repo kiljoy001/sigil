@@ -86,13 +86,15 @@ addparas(Sigilfs *f, char *path, char *buf, long n)
 			if(cut <= p + Maxpara/2)
 				cut = p + Maxpara;
 			if(cut - p >= Minpara)
-				if(br_add(f->store, path, para++, p, cut - p, nil, 0) >= 0)
+				if(br_add_at(f->store, path, para++, p, cut - p,
+				             nil, 0, p - buf) >= 0)
 					added++;
 			len -= cut - p;
 			p = cut;
 		}
 		if(len >= Minpara)
-			if(br_add(f->store, path, para++, p, len, nil, 0) >= 0)
+			if(br_add_at(f->store, path, para++, p, len, nil, 0,
+			             p - buf) >= 0)
 				added++;
 		p = q + 1;
 	}

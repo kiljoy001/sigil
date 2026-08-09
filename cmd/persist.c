@@ -115,14 +115,20 @@ store_load(Sigilfs *f)
 		const char *path = tab_get(r, "path");
 		const char *para = tab_get(r, "para");
 		const char *lsh  = tab_get(r, "lsh");
+		const char *hash = tab_get(r, "hash");
+		const char *off  = tab_get(r, "off");
+		const char *len  = tab_get(r, "len");
 
 		if(path == nil || strcmp(path, Paramrow) == 0)
 			continue;
 		/* Rows carry the LSH already computed; re-embedding on load
 		 * would be both slow and non-deterministic across model
 		 * versions. */
-		if(br_add_hex(f->store, (char*)path, para ? atoi(para) : 0,
-		              (char*)(lsh ? lsh : "")) >= 0)
+		if(br_add_restore(f->store, (char*)path, para ? atoi(para) : 0,
+		                  (char*)(lsh ? lsh : ""),
+		                  (char*)(hash ? hash : ""),
+		                  off ? strtoul(off, nil, 10) : 0,
+		                  len ? strtoul(len, nil, 10) : 0) >= 0)
 			n++;
 	}
 	tab_iter_close(it);
@@ -134,7 +140,7 @@ store_load(Sigilfs *f)
 char *
 store_commit(Sigilfs *f)
 {
-	TabColSpec cols[4];
+	TabColSpec cols[6];
 	Tab *t;
 	TabRow *r;
 	char buf[64], hex[160], bitsbuf[16], seedbuf[32];
@@ -148,8 +154,13 @@ store_commit(Sigilfs *f)
 	cols[1].name = "para";
 	cols[2].name = "hash";
 	cols[3].name = "lsh";
+	/* Where the paragraph sits in its source, so a reloaded neighbour can
+	 * still be read. Without these the store round-trips as identities and
+	 * bits but the text becomes unreachable after a restart. */
+	cols[4].name = "off";
+	cols[5].name = "len";
 
-	if((t = tab_create(f->storepath, "sigil", cols, 4)) == nil)
+	if((t = tab_create(f->storepath, "sigil", cols, 6)) == nil)
 		return (char*)tab_lasterror();
 
 	/* Parameter row first, so a reader hits it before any data. */
@@ -171,6 +182,10 @@ store_commit(Sigilfs *f)
 			continue;
 		snprint(buf, sizeof buf, "%ud", br_para(f->store, i));
 		tab_set(t, r, "para", buf);
+		snprint(buf, sizeof buf, "%lud", br_offset(f->store, i));
+		tab_set(t, r, "off", buf);
+		snprint(buf, sizeof buf, "%lud", br_length(f->store, i));
+		tab_set(t, r, "len", buf);
 		if(br_hash(f->store, i, hex, sizeof hex) == 0)
 			tab_set(t, r, "hash", hex);
 		if(br_lsh_hex(f->store, i, hex, sizeof hex) == 0)

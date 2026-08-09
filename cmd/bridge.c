@@ -24,6 +24,11 @@ struct bridge {
 	sigil_store_t st;
 	char **paths;        /* [cap] parallel to store rows */
 	unsigned *paras;
+	/* Where the paragraph sits in its file. The store holds only the
+	 * sigil, so without this a neighbour can be identified but not read,
+	 * and the projection lands on a hash rather than on text. */
+	unsigned long *offs;
+	unsigned long *lens;
 	size_t n, cap;
 
 	/* Optional. Without it, records carry the byte-shingle fallback, which
@@ -48,9 +53,13 @@ br_new(void)
 	b->cap = 4096;
 	b->paths = calloc(b->cap, sizeof *b->paths);
 	b->paras = calloc(b->cap, sizeof *b->paras);
-	if (b->paths == NULL || b->paras == NULL) {
+	b->offs  = calloc(b->cap, sizeof *b->offs);
+	b->lens  = calloc(b->cap, sizeof *b->lens);
+	if (b->paths == NULL || b->paras == NULL ||
+	    b->offs == NULL || b->lens == NULL) {
 		sigil_store_free(&b->st);
-		free(b->paths); free(b->paras); free(b);
+		free(b->paths); free(b->paras);
+		free(b->offs); free(b->lens); free(b);
 		return NULL;
 	}
 	return b;
@@ -115,6 +124,8 @@ br_free(void *p)
 		free(b->paths[i]);
 	free(b->paths);
 	free(b->paras);
+	free(b->offs);
+	free(b->lens);
 	sigil_store_free(&b->st);
 	free(b);
 }
@@ -129,6 +140,17 @@ grow(struct bridge *b)
 	if (np == NULL)
 		return -1;
 	b->paths = np;
+	{
+		unsigned long *no = realloc(b->offs, cap * sizeof *no);
+		unsigned long *nl;
+		if (no == NULL)
+			return -1;
+		b->offs = no;
+		nl = realloc(b->lens, cap * sizeof *nl);
+		if (nl == NULL)
+			return -1;
+		b->lens = nl;
+	}
 	nq = realloc(b->paras, cap * sizeof *nq);
 	if (nq == NULL)
 		return -1;
@@ -144,8 +166,9 @@ grow(struct bridge *b)
  * without a model.
  */
 long
-br_add(void *p, const char *path, unsigned para, const void *text, size_t len,
-       const unsigned long long *lsh, unsigned timestamp)
+br_add_at(void *p, const char *path, unsigned para, const void *text,
+          size_t len, const unsigned long long *lsh, unsigned timestamp,
+          unsigned long off)
 {
 	struct bridge *b = p;
 	sigil_t s;
@@ -178,6 +201,8 @@ br_add(void *p, const char *path, unsigned para, const void *text, size_t len,
 		return -1;
 	b->paths[b->n] = strdup(path ? path : "");
 	b->paras[b->n] = para;
+	b->offs[b->n] = off;
+	b->lens[b->n] = (unsigned long)len;
 	b->n++;
 	return (long)(b->n - 1);
 }
@@ -190,6 +215,32 @@ unsigned
 br_lsh_bits(void)
 {
 	return SIGIL_LSH_BITS;
+}
+
+/* Offsets unknown: persistence replays records whose source may have moved,
+ * and a wrong offset would serve the wrong text. Zero length means "not
+ * recorded" and the reader says so. */
+long
+br_add(void *p, const char *path, unsigned para, const void *text, size_t len,
+       const unsigned long long *lsh, unsigned timestamp)
+{
+	return br_add_at(p, path, para, text, len, lsh, timestamp, 0);
+}
+
+unsigned long
+br_offset(void *p, long i)
+{
+	struct bridge *b = p;
+
+	return (i >= 0 && (size_t)i < b->n) ? b->offs[i] : 0;
+}
+
+unsigned long
+br_length(void *p, long i)
+{
+	struct bridge *b = p;
+
+	return (i >= 0 && (size_t)i < b->n) ? b->lens[i] : 0;
 }
 
 long
@@ -304,7 +355,8 @@ br_similar(void *p, long i, unsigned max_distance, unsigned *out, long max_out)
  * silently produce different bits for the same text.
  */
 long
-br_add_hex(void *p, const char *path, unsigned para, const char *lshhex)
+br_add_restore(void *p, const char *path, unsigned para, const char *lshhex,
+               const char *hashhex, unsigned long off, unsigned long len)
 {
     struct bridge *b = p;
     unsigned long long lsh[SIGIL_LSH_WORDS];
@@ -322,7 +374,43 @@ br_add_hex(void *p, const char *path, unsigned para, const char *lshhex)
             }
         }
     }
-    /* The path is hashed as a stand-in for content: the text is not reloaded,
-     * and a record still needs a stable identity to be addressed by. */
-    return br_add(b, path, para, path, strlen(path ? path : ""), lsh, 0);
+    {
+        /* The stored hash is the record's identity and must survive the round
+         * trip. Recomputing it from the path -- which this did -- gave a
+         * record a different hash after a restart than the one written to
+         * disk, so /similar/<hex>/ could not be reached by the hash the store
+         * had just persisted. Content addressing means the address does not
+         * change.
+         *
+         * Offsets are restored too, so a reloaded neighbour can still be read
+         * back from its source file. */
+        long i = br_add_at(b, path, para, path,
+                           strlen(path ? path : ""), lsh, 0, off);
+        int j, c, hi;
+
+        if (i < 0)
+            return -1;
+        if (hashhex != NULL && strlen(hashhex) == SIGIL_HASH_LEN * 2) {
+            for (j = 0; j < SIGIL_HASH_LEN; j++) {
+                hi = 0;
+                for (c = 0; c < 2; c++) {
+                    int d = hashhex[j*2 + c];
+                    d = (d >= '0' && d <= '9') ? d - '0'
+                      : (d >= 'a' && d <= 'f') ? d - 'a' + 10
+                      : (d >= 'A' && d <= 'F') ? d - 'A' + 10 : 0;
+                    hi = (hi << 4) | d;
+                }
+                b->st.hash[(size_t)i * SIGIL_HASH_LEN + j] = (uint8_t)hi;
+            }
+        }
+        b->lens[i] = len;
+        return i;
+    }
+}
+
+/* Kept for callers that have no stored hash. */
+long
+br_add_hex(void *p, const char *path, unsigned para, const char *lshhex)
+{
+    return br_add_restore(p, path, para, lshhex, NULL, 0, 0);
 }
