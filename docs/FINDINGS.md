@@ -769,6 +769,49 @@ have corrupted every number here. Always assert the returned count.
 
 ---
 
+## One SYCL kernel versus four hand-written ones
+
+The maintenance case for oneAPI is real: AVX2, SSE4.2, NEON and scalar are four
+sources for one idea -- popcount the XOR of a 128-bit field, compare to a
+threshold -- and each needs its own differential test, because a wrong SIMD
+kernel does not crash, it returns a plausible distance and stays wrong.
+
+Written once in SYCL (`src/scan_sycl.cpp`), 10M records, threshold 50:
+
+| kernel | time | vs hand SIMD |
+|---|---|---|
+| **hand-written AVX2** | **9.31 ms** | 1.00x |
+| SYCL on Arc Pro B50 | 18.55 ms | 0.50x |
+| SYCL on CPU | 20.75 ms | 0.45x |
+| scalar C | 20.82 ms | 0.45x |
+
+Both SYCL paths returned results bit-identical to the scalar reference, so the
+portability claim holds: one source, correct on CPU and GPU.
+
+The performance claim does not. **SYCL on CPU landed within noise of plain
+scalar C** -- the popcount loop was not vectorised, and the hand-written
+intrinsics are 2.2x faster than what the compiler produced from the same
+algorithm. On the GPU it is the PCIe transfer again, the same finding as the
+earlier OpenCL kernel: 160 MB of LSH crosses the bus per scan, and no kernel
+speed recovers that for a store that does not live on the device.
+
+Caveat on the measurement: the kernel allocates device memory and copies even
+in the CPU case, which host USM would avoid. That inflates the CPU number
+somewhat -- but landing exactly on scalar timing points at the kernel body, not
+the copy.
+
+The useful conclusion is not "oneAPI is bad". It is that SYCL earns its place
+for **devices with no hand-written path** -- NPUs, future accelerators -- while
+the existing intrinsics stay where they already win. A 9P device server does
+not care which is underneath, which is the point of putting the composition
+layer there rather than in the programming model.
+
+Worth keeping in proportion: at 9.31 ms for 10M records the scan is already
+near memory bandwidth. Embedding the corpus is ~30 hours. Effort spent on the
+scan is optimising the wrong end by four orders of magnitude.
+
+---
+
 ## Project Gutenberg: retrieval against library cataloguing
 
 A fourth corpus, and the first at a scale where the store stops being a
