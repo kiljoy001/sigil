@@ -28,9 +28,31 @@ putting the hash first forced four bytes of interior padding and pushed the reco
 56. BLAKE3's 32 bytes align naturally, so the ordering no longer matters — but the
 assert stays, since the on-disk format depends on it.
 
-**Status: a working library, a mountable 9P server skeleton, and a body of
-measurements.** `sigilfs` mounts and answers the protocol, but there is no persistence
-and no indexer yet — see [Status](#status).
+**Status: a working library and a mountable filesystem.** `sigilfs` indexes a
+directory into paragraphs, embeds them, persists to libtab, reloads on restart, and
+answers a semantic query as a directory walk — see [Status](#status).
+
+## Using it
+
+```sh
+cmd/sigilfs -a 'tcp!127.0.0.1!5640' -f store.tab -e ~/models/all-MiniLM-L6-v2-f16.gguf &
+
+echo 'mount docs /home/me/notes' >> /mnt/sigil/ctl
+echo 'index'                     >> /mnt/sigil/ctl
+echo 'similar <hash>'            >> /mnt/sigil/ctl
+
+ls  /mnt/sigil/similar/<hash>/          # the neighbourhood
+cat /mnt/sigil/similar/<hash>/<hash>    # provenance, then the paragraph
+```
+
+The walk is the query. There is no query language and no ioctl: `similar` runs a
+scan and materializes the result as real files, and reading one seeks to the
+paragraph's recorded offset in its source.
+
+Neighbourhoods, not partitions. `/similar/A/` lists what is near A; B appearing
+there does not put A and B in a shared group, and a paragraph appears in every
+neighbourhood it is near. Similarity-only clustering measured badly enough that
+shipping a partition would be an overclaim — see below.
 
 ## What is measured
 
@@ -61,6 +83,33 @@ different papers, who never coordinated.
 This is a *lower* bound. Citations are sparse and biased, so a non-citation is not
 evidence of non-relatedness; many apparent misses are related passages that were
 simply not co-cited.
+
+### A fourth corpus: library cataloguing as ground truth
+
+Project Gutenberg has no citation graph, so the external judgement is the Library
+of Congress subject headings — a cataloguer decided two books are about the same
+thing, without reference to any embedding. 20,000 paragraphs across 210 books:
+
+| method | R@1 | R@10 | R@20 |
+|---|---|---|---|
+| float32 | 0.199 | 0.469 | 0.587 |
+| 512-bit | 0.182 | 0.471 | 0.590 |
+| 256-bit | 0.183 | 0.447 | 0.557 |
+| 128-bit | 0.130 | 0.416 | 0.542 |
+
+R@1 against 2.26% chance is **8.8x**, reproduced on two independent embedding
+backends. Two things this corpus showed that the citation corpus could not:
+
+**Non-fiction retrieves at 0.63 R@10 against literature's 0.37.** Most paragraphs
+of a novel are dialogue or scene-setting and are not *about* the book's subject,
+and the literature classes divide by national tradition — PS American, PR English,
+PQ Romance — so two sea novels land apart by the author's nationality. Averaging
+them into one number hides this.
+
+**The same-author rate among neighbours is 0.091 against a subject-match rate of
+0.199.** Subject matching runs about twice style matching, so the embedder is not
+merely recognising prose voice. Without that control the headline number would not
+be evidence of anything.
 
 ### Exact identity where a grammar exists
 
@@ -106,6 +155,20 @@ An OpenCL kernel (`bench/scan_opencl.c`) reaches 222 GB/s on an Arc Pro B50 — 
 best CPU configuration — but only for a store already resident on the device; the PCIe
 upload is 43x the kernel time. Deferred until there is an application to accelerate.
 
+One SYCL kernel (`src/scan_sycl.cpp`) replaces all four hand-written ones and lands
+within 8% of the tuned version, with results bit-identical to the scalar reference:
+
+| kernel | 10M records | maintained |
+|---|---|---|
+| hand SIMD + work pool | 2.15 ms | four kernels plus threading |
+| **SYCL, host USM** | **2.33 ms** | **one kernel, no threading code** |
+| SYCL, device USM + copy | 20.75 ms | — |
+
+The last row is why this nearly got the wrong answer: the first version of the
+benchmark copied memory to itself on the CPU path, which looked exactly like a
+compiler failing to vectorise. A measurement that makes a mature toolchain look
+broken is more likely to be wrong than the toolchain.
+
 ## Design decisions the measurements forced
 
 Several of these reversed an earlier choice. They are kept here because the reasoning
@@ -129,6 +192,22 @@ varies widely:
 separate under a coarse code; dense academic prose needs finer resolution. The
 original 128-bit choice was set from Quora alone and generalized badly.
 
+**An LLM can supply the asserted edges a corpus lacks — and it names them.** On
+Gutenberg, 2000 judged pairs separate by **+14.7 bits** under the judge's verdict
+against **+9.0** under the catalogue label, with confirmation decaying monotonically
+from 55.6% under 60 bits to 4.8% past 120. Each confirmed edge carries the subjects
+the two passages share, so a group arrives with a name rather than as an unlabelled
+blob. A second pass consolidates them — `war, battle, combat, conflict, victory,
+expedition` become one theme — for one call per sixty subjects, against one call per
+pair in the first. The layer doing the most valuable reasoning is nearly free.
+
+Prompt shape decides whether any of this works. Asking for a verdict directly
+collapsed to a constant answer in three of four attempts; asking the model to extract
+each passage's main idea *first* and only then compare gives a live classifier. The
+guard that caught the collapses was checking the verdict distribution, not the recall
+— a judge answering one way to everything cannot reorder anything, so its R@k equals
+the scan's and reads as "no harm done".
+
 **Clusters come from asserted edges, not similarity.** Connected components at a
 similarity threshold — the method originally specified — has no usable operating
 point: cos >= 0.60 puts 2018 of 5000 items in one cluster, cos >= 0.70 separates
@@ -144,24 +223,29 @@ and oldest won. What predicts post-SimHash quality is embedding *isotropy* — m
 ## Mounting it
 
 ```sh
-make sigilfs PLAN9=/usr/local/plan9      # needs plan9port and libtab
-cmd/sigilfs -s sigil &                   # posts a 9P service
-9pfuse "$NAMESPACE/sigil" /mnt/sigil     # or mount -t 9p
-
-cat /mnt/sigil/stats
-echo 'mount docs /home/me/notes' > /mnt/sigil/ctl
-```
-
-Or over TCP, which is what v9fs needs:
-
-```sh
-cmd/sigilfs -a 'tcp!127.0.0.1!5640' &
+make sigilfs PLAN9=/path/to/plan9port LIBTAB_SRC=/path/to/libtab
+cmd/sigilfs -a 'tcp!127.0.0.1!5640' -f store.tab -e ~/models/all-MiniLM-L6-v2-f16.gguf &
 sudo mount -t 9p -o trans=tcp,port=5640,version=9p2000,uname=$USER,access=user \
     127.0.0.1 /mnt/sigil
 ```
 
 `version=9p2000` must be explicit: v9fs defaults to `9p2000.L`, which lib9p does not
-speak. Add `-L` to sigilfs for a per-request trace when something misbehaves.
+speak.
+
+**Pass `-e` or the bits are not semantic.** Without a model the records carry a byte
+hash, and `/similar/` will return neighbourhoods that look plausible and mean nothing.
+`/stats` says which you have:
+
+```
+embedder	NONE -- lsh bits are a byte hash, not semantic
+```
+
+That line exists because it caught exactly this mistake during development: a
+threshold sweep that produced sensible-looking counts from meaningless codes.
+
+Use `>>` rather than `>` when writing to `/ctl`. A truncating open makes v9fs send a
+Twstat, and shell redirection then fails — see the plan9port note below. Add `-L` for
+a per-request trace.
 
 Build against a plan9port source tree, not `/usr/local/plan9`. An installed copy may
 predate the lib9p fix for a 64-bit `wstat` bug — a `(ulong)` cast applied to a 32-bit
@@ -200,6 +284,33 @@ make check-semantic LLAMA_DIR=~/llama.cpp MODEL=~/models/all-MiniLM-L6-v2-f16.gg
 Without it the library still builds and `make check-semantic` skips rather than
 silently passing against the non-semantic fallback.
 
+**On Intel Arc, use OpenVINO instead.** llama.cpp garbles output above roughly 4B
+parameters on Battlemage through *both* its SYCL and Vulkan backends — upstream
+[#20169](https://github.com/ggml-org/llama.cpp/issues/20169) (closed *not planned*),
+[#24560](https://github.com/ggml-org/llama.cpp/issues/24560),
+[#21888](https://github.com/ggml-org/llama.cpp/issues/21888). A 12B model answers
+"What is the capital of France?" with `<pad><pad>`. It is not a configuration
+problem, and it is not memory: it persists at 10 GB loaded on a 16 GB card.
+
+OpenVINO runs the same weights correctly and 2.7x faster, and installs with pip:
+
+```sh
+pip install openvino openvino-genai "optimum-intel[openvino]"
+optimum-cli export openvino -m sentence-transformers/all-MiniLM-L6-v2 \
+    --task feature-extraction /models/minilm
+python3 tools/embed_openvino.py         # 515 paragraphs/s on an Arc Pro B50
+```
+
+| backend | paragraphs/s | 55M-paragraph corpus |
+|---|---|---|
+| **OpenVINO, Arc Pro B50** | **515** | **~30 h** |
+| ollama / Vulkan | 188 | 81 h |
+| OpenVINO, CPU | 96 | 159 h |
+
+Only one pipeline may hold a device at a time. Two concurrent OpenVINO processes on
+one GPU corrupt each other's output with no warning, in a way indistinguishable from
+the llama.cpp fault above.
+
 ## Correctness
 
 Every SIMD kernel has a scalar twin, and `test/differential.c` runs both over random
@@ -218,34 +329,49 @@ decode corruption as valid data.
 
 ## Status
 
-Working: the 64-byte layout, BLAKE3 identity, trit packing, the struct-of-arrays
-store, scan kernels in scalar/AVX2/SSE4.2/NEON with differential tests, chunked
-embedding via llama.cpp, and evaluation harnesses for retrieval, clustering, and
-formula hashing. Builds and passes on x86-64 and aarch64.
+Working end to end: the 64-byte layout, BLAKE3 identity, trit packing, the
+struct-of-arrays store, scan kernels in scalar/AVX2/SSE4.2/NEON/SYCL with
+differential tests, embedding via llama.cpp or OpenVINO, libtab persistence that
+refuses to open on a parameter mismatch, a directory indexer, and `/similar/<hex>/`
+served over 9P with paragraphs read back from their source. Builds and passes on
+x86-64 and aarch64.
 
 Not built:
 
-- **Persistence.** The store is in-memory. The durable format is libtab (ndb-shaped
-  text), and its `schema=` tuple must record `model_id`, `embed_dim`, `simhash_seed`
-  and `lsh_bits` — a store whose parameters differ is not comparable and must refuse
-  to open rather than return wrong answers.
-- **Indexer.** Nothing walks a directory yet. Only tests create sigils.
-- **Indexing and similarity inside the server.** `sigilfs` mounts and serves `/ctl`
-  and `/stats`, but `index` returns "not implemented" and `/similar/` is empty. See
-  [`docs/9P-PLAN.md`](docs/9P-PLAN.md).
-- **Clustering and the classifier**, which follow from persistence.
+- **Incremental reindex.** A changed file forces a full rebuild. The per-paragraph
+  BLAKE3 makes "has this changed" a cheap comparison; it is simply not wired up.
+- **Classification in the namespace.** The two-pass classifier works in `tools/` and
+  is measured, but nothing projects its themes into the filesystem yet.
+- **A full-corpus run.** Every number here is from at most 20,000 paragraphs of a
+  231,000-paragraph sample. Embedding all 61,458 English Gutenberg texts is about 30
+  hours on an Arc Pro B50 at 515 paragraphs/s, and that — not the 2 ms scan — is the
+  bottleneck by four orders of magnitude.
 
-The tools in `tools/` work standalone today, without any of the above:
+Three bugs in this repository were found only by running the server, not by reading
+it, and all three are recorded in the log rather than quietly fixed:
+
+- `removefile()` refuses a directory that still has children, so cache flushes failed
+  silently and served stale results while reporting "file already exists".
+- `store.c` recorded `lsh_bits = 256` while the library produces 128 — and that field
+  is the guarantee two stores are comparable.
+- Persisted records came back from a restart with a **different BLAKE3** than they
+  went in with, because reload recomputed the hash from the path. Content addressing
+  whose address changes across a restart is not content addressing. The correct hash
+  was in the file the whole time and simply was not read back.
+
+The tools in `tools/` work standalone, without a server:
 
 ```sh
 tools/xlsx_ast.py '=SUM(A1,B1)' '=SUM(B1,A1)'   # same hash: SUM commutes
 tools/math_ast.py                                # LaTeX -> canonical tree hash
-bench/xlsx_eval.py /path/to/spreadsheets 500     # duplicate-formula report
+tools/gutenberg.py pg_catalog.csv /mirror        # corpus -> paragraphs + metadata
+bench/gutenberg_eval.py paragraphs.csv           # retrieval vs subject headings
 ```
 
 `bench/` holds the measurement scripts behind every number above, including the ones
 that record failures — `cluster_eval.py` demonstrates the clustering that does not
-work, `escalate.py` the cheap discriminator that does not separate.
+work, `escalate.py` the cheap discriminator that does not separate, and
+`gutenberg_rerank.py` the LLM reranking that bought +0.017 R@1 and was rejected.
 
 ## License
 
