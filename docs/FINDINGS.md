@@ -1092,7 +1092,33 @@ all-MiniLM on the Arc Pro B50 sustains **188 paragraphs/s**, so the full corpus
 is **~81 hours** of GPU time. The scan over the resulting 3.5 GB store is
 ~12 ms. Any argument about scan performance is irrelevant next to this.
 
-**Intel Arc: llama.cpp is the wrong runtime, OpenVINO is the right one.**
+**Correction: llama.cpp on Arc is fixed, via its own OpenVINO backend.**
+Upstream merged `ggml/src/ggml-openvino` in April 2026, which translates GGML
+graphs to OpenVINO at runtime. Built with `-DGGML_OPENVINO=ON`, the same GGUF
+files that garbled through SYCL and Vulkan produce correct output on the Arc:
+
+```
+$ GGML_OPENVINO_DEVICE=GPU.1 llama-simple -m Llama-3.2-3B-Q4_K_M.gguf \
+      -n 14 "The capital of France is"
+The capital of France is Paris, which is also the largest city in France.
+```
+
+A 4.4 GB model answers correctly too -- the size class that returned
+`"C" that they have` under Vulkan. 3B benchmarks at 36.78 t/s on `GPU.1`.
+
+Two build notes. If oneAPI's `setvars.sh` has been sourced, it puts
+`/opt/intel/oneapi/compiler/*/include/CL/` ahead of `/usr/include`, and its
+older `cl_ext.h` lacks constants the newer `opencl.hpp` references -- configure
+with `env -u CPATH -u INCLUDE`. The error reads as a broken OpenCL install and
+is not. And `llama-cli` ignores `-no-cnv` in this build and drops into an
+interactive session; use `llama-simple` or `llama-bench` for scripted runs.
+
+So the finding below is about the *SYCL and Vulkan* backends specifically, not
+llama.cpp as a whole. It stands as the reason the standalone OpenVINO embedder
+exists, and that backend is still the faster path for embedding, but a llama.cpp
+built this way is no longer wrong on this hardware.
+
+**Intel Arc: llama.cpp's SYCL and Vulkan backends are the wrong runtimes.**
 
 On an Arc Pro B50 (Battlemage), llama.cpp produces coherent output only up to
 about 4B parameters, then degrades into noise:
