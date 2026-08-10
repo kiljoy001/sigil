@@ -17,6 +17,36 @@ ifneq ($(wildcard $(LLAMA_DIR)/build/bin/libllama.so),)
                   -Wl,-rpath,$(LLAMA_DIR)/build/bin
 endif
 
+# OpenVINO is the preferred backend on Intel hardware: 515 paragraphs/s on an
+# Arc Pro B50 against 96 for llama.cpp on the CPU, and llama.cpp is additionally
+# wrong on Battlemage above ~4B parameters. Optional in exactly the same way --
+# without it sigil_embedder_openvino() returns NULL.
+#
+#   pip install openvino "optimum-intel[openvino]"
+#   optimum-cli export openvino -m sentence-transformers/all-MiniLM-L6-v2 \
+#       --task feature-extraction /models/minilm
+OPENVINO_DIR ?= /opt/intel/openvino
+
+# Two layouts. The toolkit installs under runtime/; the pip wheel puts headers
+# at include/ and ships libopenvino.so.<ver> with no unversioned symlink, so
+# -lopenvino does not resolve and the versioned file is linked directly.
+ifneq ($(wildcard $(OPENVINO_DIR)/runtime/include/openvino/openvino.hpp),)
+  HAVE_OPENVINO := 1
+  OV_INC = -I$(OPENVINO_DIR)/runtime/include
+  OV_LIB = -L$(OPENVINO_DIR)/runtime/lib/intel64 -lopenvino \
+           -Wl,-rpath,$(OPENVINO_DIR)/runtime/lib/intel64
+else ifneq ($(wildcard $(OPENVINO_DIR)/include/openvino/openvino.hpp),)
+  HAVE_OPENVINO := 1
+  OV_INC = -I$(OPENVINO_DIR)/include
+  OV_SO  = $(firstword $(wildcard $(OPENVINO_DIR)/libs/libopenvino.so.*))
+  OV_LIB = $(OV_SO) -Wl,-rpath,$(OPENVINO_DIR)/libs
+endif
+
+ifdef HAVE_OPENVINO
+  OVOBJ = src/embed_openvino.o
+  OV_CPPFLAGS = -DSIGIL_WITH_OPENVINO
+endif
+
 # Default model for the semantic test.
 MODEL ?= $(HOME)/models/all-MiniLM-L6-v2-f16.gguf
 
@@ -31,8 +61,13 @@ BLAKE3 = third_party/blake3/blake3.c third_party/blake3/blake3_dispatch.c \
 SRC  = $(BLAKE3) src/sigil.c src/trit.c src/store.c src/scan_scalar.c \
        src/scan_x86.c src/scan_sse.c src/scan_neon.c src/scan_generic.c src/scan_range.c \
        src/simhash.c src/embed_llama.c
-OBJ  = $(SRC:.c=.o)
+OBJ  = $(SRC:.c=.o) $(OVOBJ)
 LIB  = libsigil.a
+
+# The one C++ translation unit. Kept out of the C sources so libsigil stays
+# buildable with a C compiler alone when OpenVINO is absent.
+src/embed_openvino.o: src/embed_openvino.cpp include/sigil_embed.h
+	$(CXX) -std=c++17 -O2 -Iinclude $(OV_CPPFLAGS) $(OV_INC) -c $< -o $@
 
 TESTS = test/differential test/bench test/bench_mt test/semantic test/eval
 

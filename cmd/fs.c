@@ -40,7 +40,7 @@ statstext(Sigilfs *f)
 		f->nrecords, f->nscans,
 		f->storepath ? f->storepath : "(memory)",
 		f->model_id ? f->model_id : "(none)",
-		br_have_embedder(f->store) ? "loaded"
+		br_have_embedder(f->store) ? br_embedder_name(f->store)
 		    : "NONE -- lsh bits are a byte hash, not semantic",
 		f->embed_dim, f->lsh_bits, f->simhash_seed,
 		f->nindexed, f->thresh,

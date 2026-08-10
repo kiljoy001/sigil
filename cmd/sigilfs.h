@@ -121,5 +121,6 @@ int br_embedder_load(void *b, const char *gguf, uvlong seed);
 int br_have_embedder(void *b);
 unsigned br_embed_dim(void *b);
 unsigned br_lsh_bits(void);
+const char *br_embedder_name(void *b);
 
 #endif /* SIGILFS_H */

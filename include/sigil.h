@@ -91,8 +91,14 @@ typedef struct {
 	uint32_t cluster;                /* index into the cluster table  */
 } sigil_t;
 
-/* Guards against silent padding changes; the on-disk format depends on it. */
+/* Guards against silent padding changes; the on-disk format depends on it.
+ * Spelled both ways because the OpenVINO backend is C++, where the C11
+ * keyword does not exist. The assert is the point, not the spelling. */
+#ifdef __cplusplus
+static_assert(sizeof(sigil_t) == SIGIL_SIZE, "sigil_t must be exactly 64 bytes");
+#else
 _Static_assert(sizeof(sigil_t) == SIGIL_SIZE, "sigil_t must be exactly 64 bytes");
+#endif
 
 /* ---------------------------------------------------------------------------
  * Trits

@@ -17,7 +17,9 @@
 #include "sigil_embed.h"
 
 #include <stdlib.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* Opaque to the plan9port side. */
 struct bridge {
@@ -80,7 +82,24 @@ br_embedder_load(void *p, const char *gguf, unsigned long long seed)
 		return -1;
 	if (b->emb != NULL)
 		return 0;                        /* already loaded */
-	b->emb = sigil_embedder_llama(gguf);
+
+	/* Dispatch on what the path is rather than on a flag: an OpenVINO
+	 * export is a directory of .xml/.bin, a llama.cpp model is a .gguf
+	 * file. One -e option covers both, and the failure mode of naming the
+	 * wrong kind is a clear load error rather than a silent fallback.
+	 *
+	 * SIGIL_OV_DEVICE picks the target -- GPU.1, CPU, NPU, AUTO. On Intel
+	 * hardware OpenVINO is both faster and, above ~4B parameters, the only
+	 * one that is correct; see docs/FINDINGS.md. */
+	{
+		struct stat st;
+
+		if (stat(gguf, &st) == 0 && S_ISDIR(st.st_mode))
+			b->emb = sigil_embedder_openvino(gguf,
+				getenv("SIGIL_OV_DEVICE"));
+		else
+			b->emb = sigil_embedder_llama(gguf);
+	}
 	if (b->emb == NULL)
 		return -1;
 	if (sigil_simhash_init(&b->sh, b->emb->dim(b->emb), seed) != 0) {
@@ -241,6 +260,19 @@ br_length(void *p, long i)
 	struct bridge *b = p;
 
 	return (i >= 0 && (size_t)i < b->n) ? b->lens[i] : 0;
+}
+
+/* Which backend is actually live. Two stores built with different embedders
+ * are close but not identical -- mean cosine 0.954 between the llama.cpp and
+ * OpenVINO paths -- so this belongs in /stats next to the model name. */
+const char *
+br_embedder_name(void *p)
+{
+	struct bridge *b = p;
+
+	if (b == NULL || b->emb == NULL)
+		return "none";
+	return b->emb->name(b->emb);
 }
 
 long

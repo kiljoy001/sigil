@@ -114,6 +114,24 @@ int sigil_generate_semantic(sigil_embedder_t *emb, const sigil_simhash_t *sh,
 sigil_embedder_t *sigil_embedder_llama(const char *gguf_path);
 
 /*
+ * OpenVINO backend. Takes a directory produced by
+ *
+ *   optimum-cli export openvino -m <model> --task feature-extraction <dir>
+ *
+ * and a device string: "GPU.1", "CPU", "NPU", or "AUTO". Returns NULL if the
+ * model cannot be loaded or the build lacks SIGIL_WITH_OPENVINO.
+ *
+ * Preferred over llama.cpp on Intel hardware. On an Arc Pro B50 this runs
+ * 515 paragraphs/s against 96 for llama.cpp on the CPU, and llama.cpp is
+ * additionally *wrong* on Battlemage above roughly 4B parameters -- see
+ * docs/FINDINGS.md. Vectors agree with the llama.cpp path at mean cosine
+ * 0.954, the difference being how the two chunk long paragraphs, so stores
+ * built with different backends are close but not interchangeable.
+ */
+sigil_embedder_t *sigil_embedder_openvino(const char *model_dir,
+                                          const char *device);
+
+/*
  * Deterministic hash backend: NOT semantic. Produces a stable vector from
  * byte shingles so tests can run without a model. Named honestly so it cannot
  * be mistaken for the real thing in a stack trace.

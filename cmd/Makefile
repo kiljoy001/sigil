@@ -31,6 +31,13 @@ ifneq ($(wildcard $(LLAMA_DIR)/build/bin/libllama.so),)
                -Wl,-rpath,$(LLAMA_DIR)/build/bin -lstdc++ -lm
 endif
 
+# Same for OpenVINO. The pip wheel ships C++ headers and a versioned .so with
+# no unversioned symlink, so -lopenvino does not resolve against it -- link the
+# file directly. Point OPENVINO_LIB at libopenvino.so.<ver>.
+ifneq ($(OPENVINO_LIB),)
+  OV_LIBS = $(OPENVINO_LIB) -Wl,-rpath,$(dir $(OPENVINO_LIB)) -lstdc++ -lm
+endif
+
 TABSRC = $(wildcard $(LIBTAB_SRC)/*.c) $(MONOCYPHER)/monocypher.c
 TABOBJ = $(notdir $(TABSRC:.c=.o))
 
@@ -38,7 +45,7 @@ all: sigilfs
 
 sigilfs: $(OBJ) libtab.a $(SIGIL_ROOT)/libsigil.a
 	$(LD9) -o $@ $(OBJ) libtab.a $(SIGIL_ROOT)/libsigil.a \
-		-l9p -l9pclient -lthread $(LLAMA_LIBS)
+		-l9p -l9pclient -lthread $(LLAMA_LIBS) $(OV_LIBS)
 
 # System compiler, C11, no plan9port headers.
 bridge.o: bridge.c $(SIGIL_ROOT)/include/sigil.h
