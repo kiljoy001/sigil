@@ -250,14 +250,7 @@ sigil_embedder_openvino(const char *model_dir, const char *device)
 	}
 }
 
-#else /* !SIGIL_WITH_OPENVINO */
-
-extern "C" sigil_embedder_t *
-sigil_embedder_openvino(const char *model_dir, const char *device)
-{
-	(void)model_dir;
-	(void)device;
-	return NULL;
-}
-
-#endif
+#endif  /* SIGIL_WITH_OPENVINO -- the not-built stub lives in
+         * src/embed_llama.c, which is always compiled. Keeping it here
+         * instead meant the symbol vanished with the file and every caller
+         * failed to link. */

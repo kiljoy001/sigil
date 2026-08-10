@@ -267,3 +267,24 @@ sigil_embedder_t *sigil_embedder_hash_nonsemantic(size_t dim)
 	e->impl    = im;
 	return e;
 }
+
+/* ---------------------------------------------------------------------------
+ * OpenVINO fallback stub.
+ *
+ * The real backend is src/embed_openvino.cpp, which is compiled only when the
+ * build finds OpenVINO. Its own #else stub therefore disappears along with the
+ * file, and callers fail to link -- cmd/bridge.c references this symbol
+ * unconditionally, because which backend to use is a runtime decision made on
+ * whether -e names a directory or a .gguf.
+ *
+ * So the stub has to live in a translation unit that is always built. Here.
+ * ------------------------------------------------------------------------ */
+#ifndef SIGIL_WITH_OPENVINO
+sigil_embedder_t *sigil_embedder_openvino(const char *model_dir,
+                                          const char *device)
+{
+	(void)model_dir;
+	(void)device;
+	return NULL;
+}
+#endif

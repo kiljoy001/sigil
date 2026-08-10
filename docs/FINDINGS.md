@@ -769,6 +769,69 @@ have corrupted every number here. Always assert the returned count.
 
 ---
 
+## Persistence was quadratic, and profiling found it where reading did not
+
+`store_commit` rewrites the whole table, issuing five `tab_set` calls per
+record. Measured:
+
+| records | commit |
+|---|---|
+| 5,000 | 0.10 s |
+| 10,000 | 0.31 s |
+| 40,000 | 8.90 s |
+| 80,000 | **37.74 s** |
+
+Four times the cost for twice the rows — textbook O(n²). Extrapolated to a 60M
+paragraph corpus that is about **68 days for one commit**, which makes every
+argument about embedding throughput irrelevant.
+
+Reading the code suggested two culprits and **both were wrong**:
+
+- `tab_rowmap_rehash()` took an `Ndbtuple*` and found its owning `TabRow` by
+  walking `t->rows[]`, although every caller had that row one line earlier.
+  Fixed: 37.74 → 22.03 s. Still quadratic.
+- `tab_add_row()` rediscovered a deduplicated row the same way, after
+  `already_present()` had just matched it and thrown it away. Sigil keys every
+  paragraph of a file on the same path, so all but the first hit that path.
+  Fixed: no measurable change.
+
+`perf` then put **85% of samples inside `tab_rowmap_rehash_row`** — a function
+already patched, whose remaining loops walk a bucket chain and look innocent.
+They were innocent. The chains were not:
+
+```c
+ensure_buckets(Tab *t, int target_rows)
+{
+    if(t->buckets != nil)
+        return 0;            /* <- never grows */
+```
+
+A table built by `tab_create` starts empty, so `target_rows` is 0 and it
+allocates `HashMinBuckets` = **16 buckets, forever**. At 160k rows that is
+~10,000 entries per bucket, and every bucket walk becomes a full scan with a
+`canonical_bytes()` malloc per step. `struct Tab` already carried an unused
+`nbuckets_target` field for exactly this.
+
+Growing the array past one entry per bucket:
+
+| records | before | after | |
+|---|---|---|---|
+| 40,000 | 8.90 s | 0.148 s | 60x |
+| 80,000 | 37.74 s | 0.278 s | 136x |
+| 160,000 | 126.71 s | 0.549 s | **231x** |
+| 320,000 | — | 1.107 s | linear |
+
+60M records extrapolates to ~3.5 minutes. Verified lossless: 320k in memory,
+320k rows on disk, 320k distinct hashes, 320k restored on reload.
+
+The lesson is the process, not the bug. Two plausible O(n) scans were found by
+reading, fixed, and moved the curve by 1.7x combined; the actual cause was a
+missing resize that no amount of staring at the hot function would reveal,
+because the hot function was correct. **Profile before optimising, even when
+the code visibly contains the thing you are looking for.**
+
+---
+
 ## One SYCL kernel versus four hand-written ones
 
 The maintenance case for oneAPI is real: AVX2, SSE4.2, NEON and scalar are four
