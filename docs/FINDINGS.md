@@ -796,27 +796,45 @@ ordinary in optimised SIMD code. It was noise.
 lib9p's `srv()`, which needs no libthread; only `tpost.c` does -- still
 crashed.
 
-**Right, from the core dump.** The faulting `rip` sat below every mapped
-library, and the surrounding mappings were:
+**Wrong, and worth recording as a warning: the GPU driver.** A core dump put
+the faulting address next to `/dev/dri/renderD129` mappings -- the Arc under
+the `xe` driver -- and that looked conclusive. It was not. Two later runs
+disproved it. Restricting the process to the Arc alone with
+`ZE_AFFINITY_MASK=0`, so the i915 iGPU never initialised, still crashed
+(`i915 maps: 0`, still SIGSEGV). And a fresh core showed the neighbouring
+mapping was not a GPU buffer at all but `openvino_tokenizer.bin`.
 
-```
-0x7706c6a1a000  0x7706c6a3a000  /dev/dri/renderD129
-0x7706c6a3a000  0x7706c6a4a000  /dev/dri/renderD129
-                     ...
-fault at 0x7706c6b5f978
-```
+The GPU reading came from re-reading a **stale core file**. `ulimit -c` is 0
+in a fresh shell, so the recent crashes wrote no cores and gdb kept opening
+one from five hours earlier. Check the timestamp on a core before trusting
+what it says.
 
-`renderD129` is the Arc Pro B50, driven by **`xe`**, not `i915`. The crash is
-in GPU driver memory. That accounts for every property that made it hard to
-place: intermittent because it depends on buffer allocation, only at scale
-because that is when buffers churn, invisible under valgrind because the
-timing changes, and indifferent to libthread and to batching because neither
-was ever involved.
+**Right: the tokenizer, which valgrind had said all along.**
 
-The lesson is the order of operations. Four of the five wrong theories came
-from reading code and reasoning about what *could* fail; the answer came
-from the first look at where the process actually died. `info proc mappings`
-against a core dump should have been step one, not step six.
+Across two cores with different ASLR bases the faulting address differed --
+`0x7706c6b5f978` and `0x7565c8cad978` -- but the low bits matched exactly
+(`...978`, with frame #2 at `...14f`), and both sat **1,672 bytes below the
+mapping of `openvino_tokenizer.bin`**. A constant offset from a relocated
+mapping is a computed address, not corruption.
+
+The decisive test removed the tokenizer from the process entirely: the same
+GPU, the same `xe` driver, the same batch size, the same 218,356 paragraphs
+that reliably kill the server, with token IDs supplied by the caller and
+`libopenvino_tokenizers.so` never loaded. **218,356 inferences, no crash.**
+
+So valgrind was right at step four and it was dismissed too readily. It
+reported `Invalid read of size 16` inside `SpecialTokensSplit::evaluate`,
+44 bytes into a 52-byte block, 997 times. The reasoning for dismissing it --
+"the process never crashed under valgrind, so it must be a benign vectorised
+over-read" -- was wrong: valgrind replaces the allocator, so the read lands
+in its padding instead of an unmapped page. Under the normal allocator, at
+scale, it eventually crosses a page boundary.
+
+Two lessons, and the second cost more than the first. Read the core dump
+early -- four of the wrong theories came from reasoning about what *could*
+fail rather than looking at where the process died. And a tool that reports
+a definite memory error is not refuted by the program failing to crash under
+that tool; the tool changes the conditions that turn the error fatal.
 
 ---
 
