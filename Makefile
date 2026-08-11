@@ -45,6 +45,13 @@ endif
 ifdef HAVE_OPENVINO
   OVOBJ = src/embed_openvino.o
   OV_CPPFLAGS = -DSIGIL_WITH_OPENVINO
+  # Global, not just for the C++ rule. embed_llama.c carries the
+  # not-built stub for sigil_embedder_openvino() behind
+  # #ifndef SIGIL_WITH_OPENVINO; without the macro there, both the stub
+  # and the real definition land in libsigil.a and the linker silently
+  # picks the stub -- which returns NULL, so the server reports "cannot
+  # load model" and no OpenVINO error, because none ever ran.
+  CPPFLAGS += -DSIGIL_WITH_OPENVINO
 endif
 
 # Default model for the semantic test.

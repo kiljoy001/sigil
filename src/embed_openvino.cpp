@@ -37,6 +37,7 @@
 
 #include <openvino/openvino.hpp>
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -225,7 +226,13 @@ sigil_embedder_openvino(const char *model_dir, const char *device)
 				dir + "/openvino_tokenizer.xml", "CPU");
 			im->tok = tk.create_infer_request();
 			im->have_tok = true;
-		} catch (const std::exception &) {
+		} catch (const std::exception &e) {
+			// The tokenizer is the usual failure and the message
+			// names the cause -- "unsupported opset: extension"
+			// when libopenvino_tokenizers.so was not registered.
+			// Returning a bare nullptr here cost an hour once.
+			std::fprintf(stderr,
+				"sigil: openvino tokenizer: %s\n", e.what());
 			return nullptr;
 		}
 
@@ -245,7 +252,8 @@ sigil_embedder_openvino(const char *model_dir, const char *device)
 		e->destroy = ov_destroy;
 		e->impl    = im.release();
 		return e;
-	} catch (const std::exception &) {
+	} catch (const std::exception &e) {
+		std::fprintf(stderr, "sigil: openvino load: %s\n", e.what());
 		return nullptr;
 	}
 }
