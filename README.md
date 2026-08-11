@@ -88,7 +88,9 @@ simply not co-cited.
 
 Project Gutenberg has no citation graph, so the external judgement is the Library
 of Congress subject headings — a cataloguer decided two books are about the same
-thing, without reference to any embedding. 20,000 paragraphs across 210 books:
+thing, without reference to any embedding. The full corpus is mirrored — 60,830
+books, **59,618,093 paragraphs**, a 3.8 GB store — and the retrieval numbers below
+are from 20,000 paragraphs across 210 books of it:
 
 | method | R@1 | R@10 | R@20 |
 |---|---|---|---|
@@ -168,6 +170,54 @@ The last row is why this nearly got the wrong answer: the first version of the
 benchmark copied memory to itself on the CPU path, which looked exactly like a
 compiler failing to vectorise. A measurement that makes a mature toolchain look
 broken is more likely to be wrong than the toolchain.
+
+### Persistence was quadratic, and profiling found what reading did not
+
+`store_commit` rewrites the whole table, issuing five `tab_set` calls per record.
+Measured against libtab as it stood:
+
+| records | commit |
+|---|---|
+| 40,000 | 8.90 s |
+| 80,000 | 37.74 s |
+| 160,000 | **126.71 s** |
+
+Four times the cost for twice the rows. Extrapolated to this corpus that is roughly
+**68 days for a single commit**, which makes any argument about embedding throughput
+beside the point.
+
+Reading the code suggested two culprits and both were wrong — fixing them moved
+126.71 s to 82.96 s and it stayed quadratic. `perf` then put 85% of samples inside a
+function that had already been patched, whose loops walk a bucket chain and look
+innocent. They were innocent; the chains were not:
+
+```c
+ensure_buckets(Tab *t, int target_rows)
+{
+    if(t->buckets != nil)
+        return 0;            /* never grows */
+```
+
+A table built by `tab_create` starts empty, so it allocated 16 buckets and kept them
+— at 160k rows, ~10,000 entries per bucket, every walk a full scan with a malloc per
+step. Growing the array, plus letting `tab_add_row` reuse the row `already_present()
+`had just matched instead of rescanning:
+
+| records | before | after | |
+|---|---|---|---|
+| 40,000 | 8.90 s | 0.148 s | 60x |
+| 80,000 | 37.74 s | 0.278 s | 136x |
+| 160,000 | 126.71 s | 0.549 s | **231x** |
+| 320,000 | — | 1.107 s | linear |
+
+Fixed upstream in [libtab](https://github.com/kiljoy001/libtab), released as
+py-libtab 0.3.1, with regression tests that were themselves mutation-tested — an
+earlier version of the guard passed with the fix reverted, because unique keys never
+reach the deduplication path the rescan lived in.
+
+The lesson is the process. Two plausible O(n) scans found by reading, fixed, and
+worth 1.5x between them; the actual cause was a missing resize that no amount of
+staring at the hot function would reveal, because the hot function was correct.
 
 ## Design decisions the measurements forced
 
@@ -298,18 +348,28 @@ OpenVINO runs the same weights correctly and 2.7x faster, and installs with pip:
 pip install openvino openvino-genai "optimum-intel[openvino]"
 optimum-cli export openvino -m sentence-transformers/all-MiniLM-L6-v2 \
     --task feature-extraction /models/minilm
-python3 tools/embed_openvino.py         # 515 paragraphs/s on an Arc Pro B50
+python3 tools/embed_openvino.py         # 1184 paragraphs/s on an Arc Pro B50
 ```
 
-| backend | paragraphs/s | 55M-paragraph corpus |
+| backend | paragraphs/s | 59.6M-paragraph corpus |
 |---|---|---|
-| **OpenVINO, Arc Pro B50** | **515** | **~30 h** |
-| ollama / Vulkan | 188 | 81 h |
-| OpenVINO, CPU | 96 | 159 h |
+| **OpenVINO, Arc Pro B50** | **1184** | **~14 h** |
+| OpenVINO, CPU (i5-12600K) | 605 | 27 h |
+| ollama / Vulkan | 188 | 88 h |
+| OpenVINO, iGPU (UHD 770) | 272 | 61 h |
 
-Only one pipeline may hold a device at a time. Two concurrent OpenVINO processes on
-one GPU corrupt each other's output with no warning, in a way indistinguishable from
-the llama.cpp fault above.
+The Arc figure is warm — the first call compiles and caches the model, and an
+unwarmed measurement reported 515/s for the same work.
+
+**Different devices run concurrently and safely; the same device does not.** GPU.1
+and CPU together sustain 1491/s, which is 1.26x the Arc alone rather than the 1.79x
+naive addition — even the GPU path tokenizes on the host, so they contend there.
+Vectors stay bit-comparable: cosine agreement with the solo runs is 0.4560 vs
+0.4561.
+
+Two OpenVINO pipelines on the *same* device corrupt each other's output with no
+warning, in a way indistinguishable from the llama.cpp fault above. Serialise per
+device; parallelise across them.
 
 ## Correctness
 
@@ -342,13 +402,14 @@ Not built:
   BLAKE3 makes "has this changed" a cheap comparison; it is simply not wired up.
 - **Classification in the namespace.** The two-pass classifier works in `tools/` and
   is measured, but nothing projects its themes into the filesystem yet.
-- **A full-corpus run.** Every number here is from at most 20,000 paragraphs of a
-  231,000-paragraph sample. Embedding all 61,458 English Gutenberg texts is about 30
-  hours on an Arc Pro B50 at 515 paragraphs/s, and that — not the 2 ms scan — is the
+- **A full-corpus run.** The corpus is mirrored and extracted — 60,830 books,
+  59,618,093 paragraphs — but every retrieval number here is still from a 20,000
+  paragraph sample of it. Embedding the whole thing is ~14 hours on the Arc, or ~11
+  with the CPU working alongside it, and that — not the 12 ms scan — is the
   bottleneck by four orders of magnitude.
 
-Three bugs in this repository were found only by running the server, not by reading
-it, and all three are recorded in the log rather than quietly fixed:
+Four bugs were found only by running this, not by reading it, and all four are in
+the log rather than quietly fixed:
 
 - `removefile()` refuses a directory that still has children, so cache flushes failed
   silently and served stale results while reporting "file already exists".
@@ -358,6 +419,11 @@ it, and all three are recorded in the log rather than quietly fixed:
   went in with, because reload recomputed the hash from the path. Content addressing
   whose address changes across a restart is not content addressing. The correct hash
   was in the file the whole time and simply was not read back.
+- `sigilfs` reported "cannot load model" with no OpenVINO error, because none had
+  run: the not-built stub for `sigil_embedder_openvino()` sat behind
+  `#ifndef SIGIL_WITH_OPENVINO`, but the Makefile defined that macro only on the C++
+  compile rule. Both definitions reached the archive and the linker took the stub,
+  which returns NULL silently.
 
 The tools in `tools/` work standalone, without a server:
 
