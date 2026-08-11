@@ -59,6 +59,33 @@ struct bridge {
 
 void br_flush(void *p);
 
+/*
+ * Install an embedder directly, bypassing the path-based dispatch above.
+ *
+ * br_embedder_load() takes a filename, so the only way to reach the batching
+ * path is to have a real model and a GPU -- which means the code with the
+ * highest CRAP score in this file (br_flush, br_add_at) could not be tested
+ * at all. A caller-supplied embedder makes both deterministic and
+ * hardware-free. Ownership transfers: br_free destroys it.
+ */
+int
+br_embedder_set(void *p, sigil_embedder_t *e, unsigned long long seed)
+{
+	struct bridge *b = p;
+
+	if (b == NULL || e == NULL)
+		return -1;
+	if (b->emb != NULL)
+		return -1;                       /* refuse to leak the old one */
+	b->emb = e;
+	if (sigil_simhash_init(&b->sh, e->dim(e), seed) != 0) {
+		b->emb = NULL;
+		return -1;
+	}
+	b->have_sh = 1;
+	return 0;
+}
+
 void *
 br_new(void)
 {
@@ -348,6 +375,11 @@ br_offset(void *p, long i)
 {
 	struct bridge *b = p;
 
+	/* Guard the bridge, not just the index. Every sibling accessor here
+	 * checks for NULL; these two did not, and similar_read() calls both
+	 * on every neighbour it serves. */
+	if (b == NULL)
+		return 0;
 	return (i >= 0 && (size_t)i < b->n) ? b->offs[i] : 0;
 }
 
@@ -356,6 +388,8 @@ br_length(void *p, long i)
 {
 	struct bridge *b = p;
 
+	if (b == NULL)
+		return 0;
 	return (i >= 0 && (size_t)i < b->n) ? b->lens[i] : 0;
 }
 

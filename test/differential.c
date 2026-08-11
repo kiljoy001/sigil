@@ -174,6 +174,120 @@ static void test_trits(void)
 	       SIGIL_TRIT_MAX, 0x10000 - SIGIL_TRIT_MAX);
 }
 
+/*
+ * The SSE4.2 kernels and the ranged variants, which the dispatcher never
+ * selects on a machine with AVX2 and which therefore sat at 0% coverage.
+ *
+ * They are not dead code -- they are what a Westmere Xeon actually runs, and
+ * the header says they "assume nothing and are safe on any SSE4.2 machine".
+ * Calling them directly is the only way to check that claim here, and a wrong
+ * kernel does not crash: it returns a slightly wrong neighbour list forever.
+ */
+size_t sigil_scan_similar_sse(const sigil_store_t *st, const uint64_t *query,
+                              uint32_t max_distance, uint32_t *out,
+                              size_t max_out);
+size_t sigil_scan_timerange_sse(const sigil_store_t *st, uint32_t start,
+                                uint32_t end, uint32_t *out, size_t max_out);
+size_t sigil_scan_category_sse(const sigil_store_t *st, uint16_t category,
+                               uint32_t *out, size_t max_out);
+
+static void
+test_sse_and_ranged(void)
+{
+	sigil_store_t st;
+	uint32_t a[4096], b[4096];
+	uint64_t q[SIGIL_LSH_WORDS];
+	size_t na, nb, i, mid;
+	const size_t N = 3000;
+
+	if (sigil_store_init(&st, 16) != 0) {
+		printf("  FAIL store init\n");
+		failures++;
+		return;
+	}
+	for (i = 0; i < N; i++) {
+		char text[48];
+		sigil_t s;
+
+		snprintf(text, sizeof text, "record %zu", i);
+		sigil_generate_para(text, strlen(text), (uint32_t)i,
+		                    (uint32_t)i, (uint16_t)(i % 7), NULL, &s);
+		if (sigil_store_push(&st, &s) < 0)
+			break;
+	}
+	for (i = 0; i < SIGIL_LSH_WORDS; i++)
+		q[i] = ((uint64_t)rnd() << 32) | rnd();
+
+	/* SSE against scalar, at several radii including the extremes. */
+	for (i = 0; i <= SIGIL_LSH_BITS; i += 16) {
+		na = sigil_scan_similar_scalar(&st, q, (uint32_t)i, a, 4096);
+		nb = sigil_scan_similar_sse(&st, q, (uint32_t)i, b, 4096);
+		if (na != nb || memcmp(a, b, na * sizeof *a) != 0) {
+			printf("  FAIL sse similar at radius %zu\n", i);
+			failures++;
+			break;
+		}
+	}
+	if (i > SIGIL_LSH_BITS)
+		printf("  ok   sse similar matches scalar at every radius\n");
+
+	na = sigil_scan_timerange_scalar(&st, 100, 2000, a, 4096);
+	nb = sigil_scan_timerange_sse(&st, 100, 2000, b, 4096);
+	if (na != nb || memcmp(a, b, na * sizeof *a) != 0) {
+		printf("  FAIL sse timerange\n");
+		failures++;
+	} else {
+		printf("  ok   sse timerange matches scalar\n");
+	}
+
+	na = sigil_scan_category_scalar(&st, 3, a, 4096);
+	nb = sigil_scan_category_sse(&st, 3, b, 4096);
+	if (na != nb || memcmp(a, b, na * sizeof *a) != 0) {
+		printf("  FAIL sse category\n");
+		failures++;
+	} else {
+		printf("  ok   sse category matches scalar\n");
+	}
+
+	/* Ranged scans: two halves must union to the whole, with indices
+	 * absolute rather than relative to the slice. That is what lets a
+	 * caller split the store across threads and merge the lists. */
+	mid = N / 2;
+	na = sigil_scan_similar_scalar(&st, q, 70, a, 4096);
+	nb = sigil_scan_similar_range(&st, q, 70, 0, mid, b, 4096);
+	nb += sigil_scan_similar_range(&st, q, 70, mid, N,
+	                               b + nb, 4096 - nb);
+	if (na != nb || memcmp(a, b, na * sizeof *a) != 0) {
+		printf("  FAIL ranged similar does not tile\n");
+		failures++;
+	} else {
+		printf("  ok   ranged similar tiles the store exactly\n");
+	}
+
+	na = sigil_scan_timerange_scalar(&st, 0, 1500, a, 4096);
+	nb = sigil_scan_timerange_range(&st, 0, 1500, 0, mid, b, 4096);
+	nb += sigil_scan_timerange_range(&st, 0, 1500, mid, N,
+	                                 b + nb, 4096 - nb);
+	if (na != nb || memcmp(a, b, na * sizeof *a) != 0) {
+		printf("  FAIL ranged timerange does not tile\n");
+		failures++;
+	} else {
+		printf("  ok   ranged timerange tiles the store exactly\n");
+	}
+
+	na = sigil_scan_category_scalar(&st, 5, a, 4096);
+	nb = sigil_scan_category_range(&st, 5, 0, mid, b, 4096);
+	nb += sigil_scan_category_range(&st, 5, mid, N, b + nb, 4096 - nb);
+	if (na != nb || memcmp(a, b, na * sizeof *a) != 0) {
+		printf("  FAIL ranged category does not tile\n");
+		failures++;
+	} else {
+		printf("  ok   ranged category tiles the store exactly\n");
+	}
+
+	sigil_store_free(&st);
+}
+
 int main(void)
 {
 	/* Counts chosen to land on and around the 8- and 16-lane boundaries. */
@@ -193,6 +307,8 @@ int main(void)
 		run_case(counts[i]);
 		printf("  ok   scan: n=%zu\n", counts[i]);
 	}
+
+	test_sse_and_ranged();
 
 	if (failures) {
 		printf("\n%d FAILURES\n", failures);

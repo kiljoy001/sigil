@@ -277,6 +277,147 @@ test_embedder_contract(void)
 	e->destroy(e);
 }
 
+/* --- hex round-trip ----------------------------------------------------- */
+
+static void
+test_hex(void)
+{
+	sigil_t a, b;
+	char hex[SIGIL_SIZE * 2 + 1];
+	const char *text = "a paragraph to hex-encode and read back";
+
+	sigil_generate_para(text, strlen(text), 5, 1234, 9, NULL, &a);
+	sigil_to_hex(&a, hex);
+	eqsz(strlen(hex), SIGIL_SIZE * 2, "hex is two characters per byte");
+
+	ok(sigil_from_hex(hex, &b) == 0, "hex decodes");
+	ok(memcmp(&a, &b, sizeof a) == 0,
+	   "a record survives a hex round-trip byte for byte -- this is how a "
+	   "sigil travels through a text protocol");
+
+	/* Malformed input must be rejected, not partially decoded. A record
+	 * half-filled from a truncated hex string would carry a plausible
+	 * hash for content that was never hashed. */
+	ok(sigil_from_hex("", &b) != 0, "empty hex is rejected");
+	ok(sigil_from_hex("abcd", &b) != 0, "short hex is rejected");
+	hex[10] = 'z';
+	ok(sigil_from_hex(hex, &b) != 0, "a non-hex digit is rejected");
+	hex[10] = '0';
+	hex[SIGIL_SIZE * 2 - 1] = '\0';
+	ok(sigil_from_hex(hex, &b) != 0, "one digit short is rejected");
+}
+
+/* --- timerange and category scans --------------------------------------- */
+
+static void
+test_filter_scans(void)
+{
+	sigil_store_t st;
+	uint32_t out[256];
+	size_t n, i;
+	int k;
+
+	ok(sigil_store_init(&st, 8) == 0, "store for filter scans");
+
+	/* timestamps 0..99, categories cycling 0..4 */
+	for (k = 0; k < 100; k++) {
+		char text[48];
+		sigil_t s;
+
+		snprintf(text, sizeof text, "record %d", k);
+		sigil_generate_para(text, strlen(text), (uint32_t)k,
+		                    (uint32_t)k, (uint16_t)(k % 5), NULL, &s);
+		if (sigil_store_push(&st, &s) < 0)
+			break;
+	}
+	eqsz(st.count, 100, "100 records for the filter scans");
+
+	/* Inclusive at both ends -- the header says start <= t <= end, and an
+	 * off-by-one here silently drops a day from a range query. */
+	n = sigil_scan_timerange_scalar(&st, 10, 19, out, 256);
+	eqsz(n, 10, "timerange is inclusive at both ends");
+	for (i = 0; i < n; i++) {
+		sigil_t got;
+
+		if (sigil_store_get(&st, out[i], &got) != 0 ||
+		    got.timestamp < 10 || got.timestamp > 19) {
+			ok(0, "timerange returned an out-of-range record");
+			break;
+		}
+	}
+	if (i == n)
+		ok(1, "every timerange hit is inside the range");
+
+	eqsz(sigil_scan_timerange_scalar(&st, 500, 600, out, 256), 0,
+	     "an empty range returns nothing");
+	eqsz(sigil_scan_timerange_scalar(&st, 0, 99, out, 256), 100,
+	     "a full range returns everything");
+	ok(sigil_scan_timerange_scalar(&st, 0, 99, out, 7) <= 7,
+	   "max_out is honoured by timerange");
+
+	n = sigil_scan_category_scalar(&st, 3, out, 256);
+	eqsz(n, 20, "category scan finds every member");
+	for (i = 0; i < n; i++) {
+		sigil_t got;
+
+		if (sigil_store_get(&st, out[i], &got) != 0 || got.category != 3) {
+			ok(0, "category scan returned the wrong category");
+			break;
+		}
+	}
+	if (i == n)
+		ok(1, "every category hit has that category");
+	eqsz(sigil_scan_category_scalar(&st, 99, out, 256), 0,
+	     "an absent category returns nothing");
+
+	/* The SIMD twins must agree with the scalar ones; differential.c
+	 * covers the similarity kernel but not these two. */
+	{
+		uint32_t o2[256];
+		size_t n2;
+
+		n2 = sigil_scan_timerange_simd(&st, 10, 19, o2, 256);
+		n = sigil_scan_timerange_scalar(&st, 10, 19, out, 256);
+		ok(n == n2 && memcmp(out, o2, n * sizeof *out) == 0,
+		   "SIMD timerange matches scalar exactly");
+
+		n = sigil_scan_category_scalar(&st, 3, out, 256);
+		n2 = sigil_scan_category_simd(&st, 3, o2, 256);
+		ok(n == n2 && memcmp(out, o2, n * sizeof *out) == 0,
+		   "SIMD category matches scalar exactly");
+	}
+
+	sigil_store_free(&st);
+}
+
+/* --- the semantic pipeline ---------------------------------------------- */
+
+static void
+test_generate_semantic(void)
+{
+	sigil_embedder_t *e = sigil_embedder_hash_nonsemantic(64);
+	sigil_simhash_t sh;
+	sigil_t a, b;
+	const char *text = "the full pipeline: identity plus semantic bits";
+
+	if (e == NULL)
+		return;
+	ok(sigil_simhash_init(&sh, 64, 0x1234) == 0, "simhash for the pipeline");
+
+	ok(sigil_generate_semantic(e, &sh, text, strlen(text), 42, 3, NULL,
+	                           &a) == 0, "generate_semantic succeeds");
+	eqsz(a.timestamp, 42, "timestamp is carried through");
+	eqsz(a.category, 3, "category is carried through");
+
+	/* Deterministic: same text, same seed, same bits. */
+	ok(sigil_generate_semantic(e, &sh, text, strlen(text), 42, 3, NULL,
+	                           &b) == 0, "second call succeeds");
+	ok(memcmp(&a, &b, sizeof a) == 0, "the pipeline is deterministic");
+
+	sigil_simhash_free(&sh);
+	e->destroy(e);
+}
+
 int
 main(void)
 {
@@ -287,6 +428,9 @@ main(void)
 	test_simhash();
 	test_hamming();
 	test_embedder_contract();
+	test_hex();
+	test_filter_scans();
+	test_generate_semantic();
 
 	if (failures == 0) {
 		printf("PASS: %d checks\n", checks);

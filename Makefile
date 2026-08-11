@@ -120,11 +120,18 @@ test/semantic: test/semantic.c $(LIB)
 test/eval: test/eval.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) -o $@ $(LDFLAGS) $(LLAMA_LDFLAGS) $(LDLIBS)
 
-check: test/differential test/unit
+check: test/differential test/unit test/bridge
 	./test/differential
 	./test/unit
+	./test/bridge
 
 THEFT ?= $(HOME)/Repo/libtab/tests/vendor/theft
+
+test/bridge: test/bridge.c cmd/bridge.o $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< cmd/bridge.o $(LIB) $(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS)
+
+cmd/bridge.o: cmd/bridge.c include/sigil.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -c $< -o $@
 
 test/unit: test/unit.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< $(LIB) $(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS)

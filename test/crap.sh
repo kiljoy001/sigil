@@ -25,7 +25,8 @@ LIBOBJ=$(ls *.o | tr '\n' ' ')
 L="-L$HOME/llama.cpp/build/bin -lllama -lggml -lggml-base -Wl,-rpath,$HOME/llama.cpp/build/bin -lstdc++ -lm"
 gcc $F -c "$R/test/unit.c"   -o u.o && gcc --coverage -o unit u.o $LIBOBJ $L
 gcc $F -c "$R/test/bridge.c" -o b.o && gcc --coverage -o brt  b.o $LIBOBJ $L
-./unit >/dev/null; ./brt >/dev/null
+gcc $F -c "$R/test/differential.c" -o d.o && gcc --coverage -o diff d.o $LIBOBJ $L
+./unit >/dev/null; ./brt >/dev/null; ./diff >/dev/null
 cd "$R"
 $VENV/bin/lizard src/ cmd/ --csv 2>/dev/null > build/cov/lz.csv
 $VENV/bin/gcovr --root . --object-directory build/cov --json build/cov/cov.json >/dev/null 2>&1
