@@ -127,14 +127,17 @@ check: test/differential test/unit test/bridge
 
 THEFT ?= $(HOME)/Repo/libtab/tests/vendor/theft
 
+# -lstdc++ because libsigil.a carries embed_openvino.o when OpenVINO is
+# found, and that object needs the C++ runtime even when this test never
+# calls it.
 test/bridge: test/bridge.c cmd/bridge.o $(LIB)
-	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< cmd/bridge.o $(LIB) $(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< cmd/bridge.o $(LIB) $(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS) -lstdc++
 
 cmd/bridge.o: cmd/bridge.c include/sigil.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -c $< -o $@
 
 test/unit: test/unit.c $(LIB)
-	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< $(LIB) $(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< $(LIB) $(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS) -lstdc++
 
 # Property tests over generated operation sequences, compared against a plain
 # model. unit.c checks what someone thought to write down; these check what
