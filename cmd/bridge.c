@@ -45,9 +45,13 @@ struct bridge {
 	 * flushes. Embedding one paragraph per inference reaches 200/s on an
 	 * Arc Pro B50 against 1833/s at a batch of 128 -- 9 hours for a 59.6M
 	 * paragraph corpus instead of 83. */
-	char **btext;         /* [Batchmax] owned copies */
+	char **btext;         /* [Batchmax] owned copies of the text */
 	size_t *blen;
-	long *bidx;           /* store index each text belongs to */
+	sigil_t *bpend;       /* the record itself, complete but for its bits */
+	char **bpath;
+	unsigned *bpara;
+	unsigned long *boff;
+	unsigned long *blenrec;
 	size_t bn;
 };
 
@@ -102,16 +106,24 @@ br_new(void)
 	b->paras = calloc(b->cap, sizeof *b->paras);
 	b->offs  = calloc(b->cap, sizeof *b->offs);
 	b->lens  = calloc(b->cap, sizeof *b->lens);
-	b->btext = calloc(Batchmax, sizeof *b->btext);
-	b->blen  = calloc(Batchmax, sizeof *b->blen);
-	b->bidx  = calloc(Batchmax, sizeof *b->bidx);
+	b->btext   = calloc(Batchmax, sizeof *b->btext);
+	b->blen    = calloc(Batchmax, sizeof *b->blen);
+	b->bpend   = calloc(Batchmax, sizeof *b->bpend);
+	b->bpath   = calloc(Batchmax, sizeof *b->bpath);
+	b->bpara   = calloc(Batchmax, sizeof *b->bpara);
+	b->boff    = calloc(Batchmax, sizeof *b->boff);
+	b->blenrec = calloc(Batchmax, sizeof *b->blenrec);
 	if (b->paths == NULL || b->paras == NULL ||
 	    b->offs == NULL || b->lens == NULL ||
-	    b->btext == NULL || b->blen == NULL || b->bidx == NULL) {
+	    b->btext == NULL || b->blen == NULL || b->bpend == NULL ||
+	    b->bpath == NULL || b->bpara == NULL || b->boff == NULL ||
+	    b->blenrec == NULL) {
 		sigil_store_free(&b->st);
 		free(b->paths); free(b->paras);
 		free(b->offs); free(b->lens);
-		free(b->btext); free(b->blen); free(b->bidx); free(b);
+		free(b->btext); free(b->blen); free(b->bpend);
+		free(b->bpath); free(b->bpara); free(b->boff);
+		free(b->blenrec); free(b);
 		return NULL;
 	}
 	return b;
@@ -195,11 +207,17 @@ br_free(void *p)
 	free(b->paras);
 	free(b->offs);
 	free(b->lens);
-	for (size_t k = 0; k < b->bn; k++)
+	for (size_t k = 0; k < b->bn; k++) {
 		free(b->btext[k]);
+		free(b->bpath[k]);
+	}
 	free(b->btext);
 	free(b->blen);
-	free(b->bidx);
+	free(b->bpend);
+	free(b->bpath);
+	free(b->bpara);
+	free(b->boff);
+	free(b->blenrec);
 	sigil_store_free(&b->st);
 	free(b);
 }
@@ -257,10 +275,9 @@ br_add_at(void *p, const char *path, unsigned para, const void *text,
 		for (i = 0; i < SIGIL_LSH_WORDS; i++)
 			s.lsh[i] = lsh[i];
 	} else if (b->emb != NULL && b->emb->embed_batch != NULL) {
-		/* Defer: queue the text and fill the bits when the batch
-		 * flushes. The record carries the byte-shingle fallback until
-		 * then, which is what it would have kept had embedding
-		 * failed. */
+		/* Defer to a batch. See br_add_at's comment below: the record
+		 * is not pushed until its bits are known, so nothing in the
+		 * store is ever revisited. */
 		defer = 1;
 	} else if (b->emb != NULL) {
 		/* Backend with no batch path -- llama.cpp, the hash fallback.
@@ -278,6 +295,54 @@ br_add_at(void *p, const char *path, unsigned para, const void *text,
 		}
 	}
 
+	if (defer) {
+		/*
+		 * Hold the whole record, not just its text, and push it only
+		 * once the batch has produced its bits.
+		 *
+		 * The previous shape pushed the record immediately with
+		 * fallback bits and had br_flush() read it back, overwrite its
+		 * lsh row, and write it into the store again. That is a
+		 * read-modify-write on live store memory, and it is wrong for
+		 * two independent reasons. A later br_add_at can call grow(),
+		 * and sigil_store_push -> store_grow reallocates st.lsh, so a
+		 * pointer computed into that array before the flush may no
+		 * longer be valid. And a record that is visible to readers
+		 * while its bits are still changing has no single moment at
+		 * which it is correct -- a scan racing the flush compares
+		 * against bits that are neither the fallback nor the embedded
+		 * ones.
+		 *
+		 * Building the record once and publishing it complete removes
+		 * both. Nothing in the store is ever mutated after the push.
+		 */
+		char *copy = malloc(len + 1);
+
+		if (copy == NULL) {
+			/* Cannot queue it -- fall back to publishing now with
+			 * the byte-shingle bits, which is what a failed embed
+			 * would have left. A paragraph that will not embed is
+			 * still worth addressing by content. */
+			goto publish;
+		}
+		memcpy(copy, text, len);
+		copy[len] = '\0';
+		b->btext[b->bn] = copy;
+		b->blen[b->bn] = len;
+		b->bpend[b->bn] = s;                     /* the whole record */
+		b->bpath[b->bn] = strdup(path ? path : "");
+		b->bpara[b->bn] = para;
+		b->boff[b->bn] = off;
+		b->blenrec[b->bn] = (unsigned long)len;
+		b->bn++;
+		if (b->bn == Batchmax)
+			br_flush(b);
+		/* The index this record will occupy once the batch lands.
+		 * Stable because nothing else appends in between. */
+		return (long)(b->n + b->bn - 1);
+	}
+
+publish:
 	if (sigil_store_push(&b->st, &s) < 0)
 		return -1;
 	b->paths[b->n] = strdup(path ? path : "");
@@ -285,21 +350,6 @@ br_add_at(void *p, const char *path, unsigned para, const void *text,
 	b->offs[b->n] = off;
 	b->lens[b->n] = (unsigned long)len;
 	b->n++;
-
-	if (defer) {
-		char *copy = malloc(len + 1);
-
-		if (copy == NULL)
-			return (long)(b->n - 1);   /* keeps fallback bits */
-		memcpy(copy, text, len);
-		copy[len] = '\0';
-		b->btext[b->bn] = copy;
-		b->blen[b->bn] = len;
-		b->bidx[b->bn] = (long)(b->n - 1);
-		b->bn++;
-		if (b->bn == Batchmax)
-			br_flush(b);
-	}
 	return (long)(b->n - 1);
 }
 
@@ -318,35 +368,54 @@ br_flush(void *p)
 	struct bridge *b = p;
 	size_t dim, i;
 	float *v;
+	int embedded = 0;
 
-	if (b == NULL || b->bn == 0 || b->emb == NULL ||
-	    b->emb->embed_batch == NULL)
+	if (b == NULL || b->bn == 0)
 		return;
+	if (b->emb == NULL || b->emb->embed_batch == NULL) {
+		/* Nothing can embed these; publish them with the bits they
+		 * already carry rather than stranding them in the queue. */
+		goto publish;
+	}
 
 	dim = b->emb->dim(b->emb);
 	v = malloc(b->bn * dim * sizeof *v);
 	if (v != NULL) {
 		if (b->emb->embed_batch(b->emb, (const char **)b->btext,
 		                        b->blen, b->bn, v) > 0) {
-			for (i = 0; i < b->bn; i++) {
-				sigil_t s;
-
-				if (sigil_store_get(&b->st, (size_t)b->bidx[i],
-				                    &s) != 0)
-					continue;
+			for (i = 0; i < b->bn; i++)
 				sigil_simhash_project(&b->sh, v + i * dim,
-				                      s.lsh);
-				/* Write the bits back in place: the store is
-				 * struct-of-arrays, so only the lsh row moves. */
-				memcpy(b->st.lsh + (size_t)b->bidx[i] *
-				           SIGIL_LSH_WORDS,
-				       s.lsh, sizeof s.lsh);
-			}
+				                      b->bpend[i].lsh);
+			embedded = 1;
 		}
 		free(v);
 	}
-	for (i = 0; i < b->bn; i++)
+	(void)embedded;   /* a failed embed leaves the fallback bits in place */
+
+publish:
+	/*
+	 * Push each record complete. The store is append-only and nothing
+	 * here revisits a row it has already written, so a reader either sees
+	 * a record with its final bits or does not see it at all -- there is
+	 * no window in which a record exists with bits that are about to
+	 * change under it.
+	 */
+	for (i = 0; i < b->bn; i++) {
+		if (b->n == b->cap && grow(b) != 0)
+			break;
+		if (sigil_store_push(&b->st, &b->bpend[i]) < 0)
+			break;
+		b->paths[b->n] = b->bpath[i];       /* ownership transfers */
+		b->paras[b->n] = b->bpara[i];
+		b->offs[b->n] = b->boff[i];
+		b->lens[b->n] = b->blenrec[i];
+		b->n++;
+		b->bpath[i] = NULL;
+	}
+	for (i = 0; i < b->bn; i++) {
 		free(b->btext[i]);
+		free(b->bpath[i]);                  /* NULL if it was handed on */
+	}
 	b->bn = 0;
 }
 

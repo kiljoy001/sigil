@@ -769,6 +769,57 @@ have corrupted every number here. Always assert the returned count.
 
 ---
 
+## An indexing crash, and five wrong diagnoses before the right one
+
+Indexing a 3,157-file subtree segfaulted reproducibly at around 130 seconds.
+The same embedder, over the same paragraphs, ran 218,356 of them clean in a
+standalone driver. Finding the cause took five wrong theories, and the
+sequence is more useful than the answer.
+
+**Wrong: the thread stack.** libthread gives each proc 32 KB and OpenVINO's
+inference path is deep. Raising it to 8 MB moved the crash later and did not
+remove it.
+
+**Wrong: `proccreate`.** Serving inline on the main thread instead of a
+libthread proc changed nothing.
+
+**Wrong: my batching.** Reverting to the per-text path crashed identically,
+which means the bug predates the batch work entirely.
+
+**Wrong: a tokenizer over-read.** Valgrind reported `Invalid read of size 16`
+inside `SpecialTokensSplit::evaluate`, 44 bytes into a 52-byte block. Real,
+and 997 of them -- but the process **never crashed under valgrind**. A
+vectorised string routine reading a full 16-byte word past a short buffer is
+ordinary in optimised SIMD code. It was noise.
+
+**Wrong: libthread at all.** Building without it -- a plain `main()` and
+lib9p's `srv()`, which needs no libthread; only `tpost.c` does -- still
+crashed.
+
+**Right, from the core dump.** The faulting `rip` sat below every mapped
+library, and the surrounding mappings were:
+
+```
+0x7706c6a1a000  0x7706c6a3a000  /dev/dri/renderD129
+0x7706c6a3a000  0x7706c6a4a000  /dev/dri/renderD129
+                     ...
+fault at 0x7706c6b5f978
+```
+
+`renderD129` is the Arc Pro B50, driven by **`xe`**, not `i915`. The crash is
+in GPU driver memory. That accounts for every property that made it hard to
+place: intermittent because it depends on buffer allocation, only at scale
+because that is when buffers churn, invisible under valgrind because the
+timing changes, and indifferent to libthread and to batching because neither
+was ever involved.
+
+The lesson is the order of operations. Four of the five wrong theories came
+from reading code and reasoning about what *could* fail; the answer came
+from the first look at where the process actually died. `info proc mappings`
+against a core dump should have been step one, not step six.
+
+---
+
 ## Persistence was quadratic, and profiling found it where reading did not
 
 `store_commit` rewrites the whole table, issuing five `tab_set` calls per

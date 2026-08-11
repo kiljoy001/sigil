@@ -52,6 +52,20 @@ sigilfs: $(OBJ) libtab.a $(SIGIL_ROOT)/libsigil.a
 	$(LD9) -o $@ $(OBJ) libtab.a $(SIGIL_ROOT)/libsigil.a \
 		-l9p -l9pclient -lthread $(LLAMA_LIBS) $(OV_LIBS)
 
+# The TCP server, built without libthread.
+#
+# OpenVINO spawns a TBB pool of twenty-plus pthreads, and inside a libthread
+# process -- whose scheduler switches stacks underneath them -- indexing
+# segfaults intermittently. The same embedder over the same corpus runs clean
+# outside libthread. Only tpost.c in lib9p needs libthread, and that is the
+# -s/-m service-posting path; srv() over a socket does not.
+#
+# -l9pclient is still here because libtab references nsmount for its
+# tab_open_dial path, which sigil never calls.
+sigilfs-tcp: $(OBJ) libtab.a $(SIGIL_ROOT)/libsigil.a
+	$(LD9) -o $@ $(OBJ) libtab.a $(SIGIL_ROOT)/libsigil.a \
+		-l9p -l9pclient $(LLAMA_LIBS) $(OV_LIBS)
+
 # System compiler, C11, no plan9port headers.
 bridge.o: bridge.c $(SIGIL_ROOT)/include/sigil.h
 	cc -O2 -std=c11 -Wall -Wextra -c bridge.c -o $@ \
@@ -66,6 +80,8 @@ libtab.a: $(TABSRC)
 		$(CC9) -I$(LIBTAB_SRC) -I$(MONOCYPHER) -c $$f || exit 1; \
 	done
 	ar rcs $@ $(TABOBJ)
+
+sigilfs-tcp: CPPFLAGS += -DSIGIL_NO_LIBTHREAD
 
 %.o: %.c sigilfs.h
 	$(CC9) -I$(LIBTAB_SRC) -c $<

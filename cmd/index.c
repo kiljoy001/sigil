@@ -134,6 +134,8 @@ onefile(Sigilfs *f, char *path)
 		return 0;
 	}
 	buf[n] = '\0';
+	if(tracing)
+		fprint(2, "INDEX %s (%ld bytes)\n", path, n);
 	added = addparas(f, path, buf, n);
 	free(buf);
 	return added;

@@ -413,19 +413,25 @@ test_batch_flush(void)
 	   "embedder name is reported -- two stores built with different "
 	   "backends are not interchangeable");
 
-	/* A queued record carries fallback bits until the batch flushes. That
-	 * is deliberate: the record is addressable by content immediately, and
-	 * only its similarity bits are deferred. */
+	/* A queued record is NOT visible until its bits are final.
+	 *
+	 * The earlier design pushed it immediately with fallback bits and let
+	 * the flush overwrite them in place. That gives a window in which a
+	 * scan can read a record whose bits are about to change -- neither the
+	 * fallback nor the embedded ones -- and it means the flush performs a
+	 * read-modify-write on store memory that a later grow() may have
+	 * moved. Publishing the record complete removes both. */
 	br_add_at(b, "/q.txt", 1, "first paragraph of text", 23, NULL, 0, 0);
-	eql(br_count(b), 1, "the record is in the store before the flush");
-	ok(br_lsh_hex(b, 0, lsh_before, sizeof lsh_before) == 0, "lsh reads");
+	eql(br_count(b), 0,
+	    "a queued record is not visible until its bits are known");
 	eql((long)f->batch_calls, 0, "nothing embedded yet");
 
 	br_flush(b);
 	eql((long)f->batch_calls, 1, "flush embeds the queue in one call");
-	ok(br_lsh_hex(b, 0, lsh_after, sizeof lsh_after) == 0, "lsh reads");
-	ok(strcmp(lsh_before, lsh_after) != 0,
-	   "flush replaces the fallback bits with embedded ones");
+	eql(br_count(b), 1, "the record appears when the flush publishes it");
+	ok(br_lsh_hex(b, 0, lsh_after, sizeof lsh_after) == 0,
+	   "and it has bits");
+	(void)lsh_before;
 
 	/* A second flush with nothing queued must not re-embed: br_flush is
 	 * called from three places and two of them are on read paths. */

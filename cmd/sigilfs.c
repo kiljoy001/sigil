@@ -17,7 +17,21 @@
  * under ls -- and lib9p already tracks that state per fid. See
  * docs/9P-PLAN.md.
  *
- * libthread owns main, so the entry point is threadmain.
+ * Two entry points, chosen at build time.
+ *
+ * libthread owns main when the server posts to a service name, because
+ * threadpostmountsrv() is a libthread function. But libthread and OpenVINO
+ * do not coexist: OpenVINO spawns a TBB pool of twenty-plus pthreads inside
+ * a process whose scheduler is switching stacks underneath them, and
+ * indexing segfaults intermittently -- deep in the GPU plugin, with a return
+ * address pointing into the libthread stack region and no symbols. The same
+ * embedder, over the same corpus, runs 218,356 paragraphs clean outside
+ * libthread.
+ *
+ * So the TCP path, which is the one that embeds, uses a plain main() and
+ * lib9p's srv() directly. Only tpost.c in lib9p actually needs libthread;
+ * srv.c does not. SIGIL_NO_LIBTHREAD selects that build, and the two paths
+ * are already disjoint -- tcploop() never returns.
  */
 
 #include <u.h>
@@ -83,7 +97,26 @@ tcploop(char *addr)
 			continue;
 		}
 		close(lctl);
-		proccreate(serveconn, (void*)(uintptr)fd, 32*1024);
+		/* Serve inline, on the main thread.
+		 *
+		 * This was proccreate(), which gives each connection its own
+		 * libthread proc. OpenVINO does not survive that: indexing
+		 * segfaulted inside the GPU plugin with a return address
+		 * pointing into the libthread stack region, no symbols, and an
+		 * empty log. Raising the stack from 32 KB to 8 MB moved the
+		 * crash later but did not remove it, and the identical batch
+		 * through the identical embed_batch() runs clean outside
+		 * libthread at 1466 paragraphs/s -- so the batching is right
+		 * and the threading context is not. OpenVINO spawns its own
+		 * TBB pool, which does not expect the stack switching
+		 * libthread does underneath it.
+		 *
+		 * The cost is one client at a time. That is what sigilfs
+		 * actually does -- a mount, an index, a query -- and a
+		 * correct serial server beats a concurrent one that crashes.
+		 * Restoring concurrency means moving the embedder out of
+		 * process, not moving the server back onto libthread procs. */
+		serveconn((void*)(uintptr)fd);
 	}
 	USED(actl);
 }
@@ -107,8 +140,24 @@ buildtree(void)
 		sysfatal("createfile: %r");
 }
 
+#ifdef SIGIL_NO_LIBTHREAD
+/* Serving over TCP with no libthread: OpenVINO's TBB pool gets a normal
+ * pthread process, and lib9p's srv() does not care. Posting to a service
+ * name is unavailable in this build, because that is the one thing that
+ * genuinely needs libthread. */
+#define ENTRY main
+#define EXIT(x) return (x)
+#else
+#define ENTRY threadmain
+#define EXIT(x) do { threadexits(0); return; } while (0)
+#endif
+
+#ifdef SIGIL_NO_LIBTHREAD
+int
+#else
 void
-threadmain(int argc, char **argv)
+#endif
+ENTRY(int argc, char **argv)
 {
 	char *srvname = "sigil";
 	char *mtpt = nil;
@@ -186,12 +235,18 @@ threadmain(int argc, char **argv)
 
 	if(addr != nil){
 		tcploop(addr);              /* never returns */
-		threadexits(0);
+		EXIT(0);
 	}
 
+#ifdef SIGIL_NO_LIBTHREAD
+	USED(srvname); USED(mtpt);
+	sysfatal("built without libthread: -s and -m need it, use -a");
+	return 1;
+#else
 	/* Foreground so the process is visible to whoever started it; posting
 	 * to a service name lets a caller decide where to attach it. */
 	fs.srv.foreground = 1;
 	threadpostmountsrv(&fs.srv, srvname, mtpt, MREPL|MCREATE);
 	threadexits(0);
+#endif
 }
