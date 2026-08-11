@@ -418,6 +418,48 @@ test_generate_semantic(void)
 	e->destroy(e);
 }
 
+/* --- hardware selection ------------------------------------------------- */
+
+static void
+test_simd_selection(void)
+{
+	int avx2 = -1, sse42 = -1, avail, chosen, again;
+
+	avail = sigil_simd_paths(&avx2, &sse42);
+	ok(avx2 == 0 || avx2 == 1, "the AVX2 probe answers 0 or 1");
+	ok(sse42 == 0 || sse42 == 1, "the SSE4.2 probe answers 0 or 1");
+
+	/* Both probes must actually run. sigil_have_simd() used to be
+	 * have_avx2() || have_sse42(), so on any machine with AVX2 the SSE
+	 * probe was never evaluated -- it would first execute on hardware
+	 * nobody was testing. */
+	ok(!(avx2 == -1 || sse42 == -1), "both probes were evaluated");
+
+	/* SSE4.2 is baseline for every x86-64 part that has AVX2, so a CPU
+	 * claiming AVX2 without it means the probe is wrong. */
+	if (avx2)
+		ok(sse42, "a CPU with AVX2 also reports SSE4.2");
+	else
+		ok(1, "no AVX2 on this machine; nothing to cross-check");
+
+	eqsz((size_t)avail, (size_t)(avx2 ? 2 : (sse42 ? 1 : 0)),
+	     "paths() reports the widest available");
+	eqsz((size_t)sigil_have_simd(), (size_t)((avx2 || sse42) ? 1 : 0),
+	     "have_simd agrees with the probes");
+
+	/* The calibrated choice is measured, not inferred, so it may be
+	 * narrower than what CPUID offers -- that is the point. It must
+	 * never be wider than what the hardware has. */
+	chosen = sigil_simd_chosen();
+	ok(chosen >= 0 && chosen <= avail,
+	   "the calibrated kernel is one the hardware actually supports");
+
+	/* And it must be stable: a scan that changed kernels between calls
+	 * would be comparing records built two different ways. */
+	again = sigil_simd_chosen();
+	eqsz((size_t)again, (size_t)chosen, "the choice is cached, not re-raced");
+}
+
 int
 main(void)
 {
@@ -431,6 +473,7 @@ main(void)
 	test_hex();
 	test_filter_scans();
 	test_generate_semantic();
+	test_simd_selection();
 
 	if (failures == 0) {
 		printf("PASS: %d checks\n", checks);

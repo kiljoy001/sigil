@@ -88,7 +88,7 @@ CORPUS ?= test/data/corpus.txt
 PLAN9 ?= $(HOME)/Repo/plan9port
 LIBTAB_SRC ?= $(HOME)/Repo/objective-9c/libtab
 
-.PHONY: all check check-semantic eval corpus bench bench-mt clean sbom sigilfs prop sanitize fuzz mutate
+.PHONY: all check check-semantic eval corpus bench bench-mt clean sbom sigilfs prop sanitize fuzz mutate oom
 
 all: $(LIB)
 
@@ -120,10 +120,11 @@ test/semantic: test/semantic.c $(LIB)
 test/eval: test/eval.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) -o $@ $(LDFLAGS) $(LLAMA_LDFLAGS) $(LDLIBS)
 
-check: test/differential test/unit test/bridge
+check: test/differential test/unit test/bridge test/oom
 	./test/differential
 	./test/unit
 	./test/bridge
+	./test/oom
 
 THEFT ?= $(HOME)/Repo/libtab/tests/vendor/theft
 
@@ -149,6 +150,15 @@ test/prop: test/prop.c $(LIB)
 
 prop: test/prop
 	./test/prop
+
+# Allocation-failure paths, via ld --wrap. "Needs an out-of-memory condition"
+# is not a reason to leave error handling untested; it is a reason to inject
+# the failure deterministically.
+test/oom: test/oom.c cmd/bridge.o $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< cmd/bridge.o $(LIB) 		-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc 		$(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS) -lstdc++
+
+oom: test/oom
+	./test/oom
 
 # ASan + UBSan over both suites. libsigil only: OpenVINO dlopens TBB with
 # RTLD_DEEPBIND, which the sanitizer runtime refuses, and the logic worth

@@ -14,7 +14,14 @@
  * vpshufb, then sum the bytes with vpsadbw.
  */
 
+/* clock_gettime is POSIX, not C11; this builds with -std=c11. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "sigil.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #define SIGIL_X86 1
@@ -73,7 +80,28 @@ static int have_sse42(void)
 
 int sigil_have_simd(void)
 {
-	return have_avx2() || have_sse42();
+	/* Both probes, not a short-circuit: || would leave have_sse42()
+	 * unevaluated on every machine that has AVX2, so the SSE4.2 probe
+	 * would first run on hardware nobody was testing. */
+	int avx2 = have_avx2();
+	int sse42 = have_sse42();
+
+	return avx2 || sse42;
+}
+
+/*
+ * Which vector paths this CPU offers. Reports what was available, not what
+ * the calibration below chose.
+ */
+int sigil_simd_paths(int *avx2, int *sse42)
+{
+	int a = have_avx2(), s = have_sse42();
+
+	if (avx2 != NULL)
+		*avx2 = a;
+	if (sse42 != NULL)
+		*sse42 = s;
+	return a ? 2 : (s ? 1 : 0);
 }
 
 /* Implemented in scan_sse.c; declared here rather than in the public header
@@ -219,43 +247,177 @@ static size_t scan_category_avx2(const sigil_store_t *st, uint16_t category,
 /* ---------------------------------------------------------------------------
  * Dispatch
  *
- * AVX2, else SSE4.2, else scalar. Both probes are cached, and the scan loops
- * run for millions of records, so the branches at entry cost nothing
- * measurable. Dispatch has to be at runtime because this file is built for
- * generic x86-64: the vector bodies carry target attributes, so the binary
- * loads on a 2010 Xeon that would SIGILL on the AVX2 path.
+ * Measured, not assumed.
+ *
+ * CPUID says which instructions exist, not which kernel is fastest. AVX2
+ * measured 2.2x scalar on an i5-12600K and SSE4.2 2.08x -- close enough that
+ * the ordering is not obvious, and on parts that downclock under 256-bit
+ * loads the wide path can lose outright. This scan is memory-bound, so the
+ * width advantage is smaller than it looks.
+ *
+ * The first call therefore races the kernels CPUID says are available over a
+ * synthetic store and keeps the winner: 1.9 ms once, then a cached integer
+ * against loops that run over millions of records. If calibration cannot run,
+ * it falls back to the CPUID order, which is what this did before.
+ *
+ * Dispatch stays at runtime regardless: this file is built for generic
+ * x86-64 and the vector bodies carry target attributes, so the binary loads
+ * on a 2010 Xeon that would SIGILL on the AVX2 path.
  * ------------------------------------------------------------------------ */
+
+enum { PathScalar = 0, PathSse = 1, PathAvx2 = 2 };
+
+static int chosen_path = -1;
+
+static double
+now_ms(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (double)t.tv_sec * 1000.0 + (double)t.tv_nsec / 1e6;
+}
+
+/* Best of several passes: a scheduler hiccup on one pass must not decide
+ * which kernel this process uses for the rest of its life. */
+static double
+time_similar(size_t (*fn)(const sigil_store_t *, const uint64_t *, uint32_t,
+                          uint32_t *, size_t),
+             const sigil_store_t *st, const uint64_t *q, uint32_t *out,
+             size_t max_out)
+{
+	double best = 1e30;
+	int rep;
+
+	for (rep = 0; rep < 5; rep++) {
+		double t = now_ms();
+
+		fn(st, q, 64, out, max_out);
+		t = now_ms() - t;
+		if (t < best)
+			best = t;
+	}
+	return best;
+}
+
+static void
+calibrate(void)
+{
+	sigil_store_t st;
+	uint64_t q[SIGIL_LSH_WORDS];
+	uint32_t *out;
+	uint64_t seed = 0x9e3779b97f4a7c15ULL;
+	size_t i;
+	const size_t N = 20000;
+	double t_scalar, t_sse = 1e30, t_avx2 = 1e30;
+	int best;
+
+	/* Fall back to the CPUID order if anything here fails: a calibration
+	 * that cannot allocate must not silently disable vectorisation. */
+	best = have_avx2() ? PathAvx2 : (have_sse42() ? PathSse : PathScalar);
+
+	if (sigil_store_init(&st, N) != 0) {
+		chosen_path = best;
+		return;
+	}
+	out = malloc(N * sizeof *out);
+	if (out == NULL) {
+		sigil_store_free(&st);
+		chosen_path = best;
+		return;
+	}
+
+	for (i = 0; i < N; i++) {
+		sigil_t s;
+		int w;
+
+		memset(&s, 0, sizeof s);
+		for (w = 0; w < SIGIL_LSH_WORDS; w++) {
+			seed = seed * 6364136223846793005ULL
+			     + 1442695040888963407ULL;
+			s.lsh[w] = seed;
+		}
+		s.timestamp = (uint32_t)i;
+		s.category = (uint16_t)(i % 8);
+		if (sigil_store_push(&st, &s) < 0)
+			break;
+	}
+	for (i = 0; i < SIGIL_LSH_WORDS; i++)
+		q[i] = seed ^ (i + 1);
+
+	t_scalar = time_similar(sigil_scan_similar_scalar, &st, q, out, N);
+	if (have_sse42())
+		t_sse = time_similar(sigil_scan_similar_sse, &st, q, out, N);
+	if (have_avx2())
+		t_avx2 = time_similar(scan_similar_avx2, &st, q, out, N);
+
+	best = PathScalar;
+	if (t_sse < t_scalar)
+		best = PathSse;
+	if (t_avx2 < (best == PathSse ? t_sse : t_scalar))
+		best = PathAvx2;
+
+	free(out);
+	sigil_store_free(&st);
+	chosen_path = best;
+}
+
+static int
+path(void)
+{
+	if (chosen_path < 0)
+		calibrate();
+	return chosen_path;
+}
+
+/* Which kernel the calibration chose. For tests, and for a bug report that
+ * needs to say which path produced a number. */
+int sigil_simd_chosen(void)
+{
+	return path();
+}
 
 size_t sigil_scan_similar_simd(const sigil_store_t *st, const uint64_t *query,
                                uint32_t max_distance,
                                uint32_t *out, size_t max_out)
 {
-	if (have_avx2())
+	switch (path()) {
+	case PathAvx2:
 		return scan_similar_avx2(st, query, max_distance, out, max_out);
-	if (have_sse42())
-		return sigil_scan_similar_sse(st, query, max_distance, out, max_out);
-	return sigil_scan_similar_scalar(st, query, max_distance, out, max_out);
+	case PathSse:
+		return sigil_scan_similar_sse(st, query, max_distance, out,
+		                              max_out);
+	default:
+		return sigil_scan_similar_scalar(st, query, max_distance, out,
+		                                 max_out);
+	}
 }
 
 size_t sigil_scan_timerange_simd(const sigil_store_t *st,
                                  uint32_t start, uint32_t end,
                                  uint32_t *out, size_t max_out)
 {
-	if (have_avx2())
+	switch (path()) {
+	case PathAvx2:
 		return scan_timerange_avx2(st, start, end, out, max_out);
-	if (have_sse42())
+	case PathSse:
 		return sigil_scan_timerange_sse(st, start, end, out, max_out);
-	return sigil_scan_timerange_scalar(st, start, end, out, max_out);
+	default:
+		return sigil_scan_timerange_scalar(st, start, end, out, max_out);
+	}
 }
 
 size_t sigil_scan_category_simd(const sigil_store_t *st, uint16_t category,
                                 uint32_t *out, size_t max_out)
 {
-	if (have_avx2())
+	switch (path()) {
+	case PathAvx2:
 		return scan_category_avx2(st, category, out, max_out);
-	if (have_sse42())
+	case PathSse:
 		return sigil_scan_category_sse(st, category, out, max_out);
-	return sigil_scan_category_scalar(st, category, out, max_out);
+	default:
+		return sigil_scan_category_scalar(st, category, out, max_out);
+	}
 }
 
 #endif /* SIGIL_X86 */

@@ -270,6 +270,16 @@ size_t sigil_scan_category_range(const sigil_store_t *st, uint16_t category,
  * aarch64, zero where they forward to the scalar reference. */
 int sigil_have_simd(void);
 
+/* Which vector paths the CPU offers: 2 = AVX2, 1 = SSE4.2, 0 = scalar.
+ * Either pointer may be NULL. Reports what was available, not what the
+ * dispatcher chose. */
+int sigil_simd_paths(int *avx2, int *sse42);
+
+/* Which kernel the runtime calibration actually chose: 2 = AVX2, 1 = SSE4.2,
+ * 0 = scalar. CPUID reports what exists; this reports what measured fastest
+ * on this machine, which is not always the widest. */
+int sigil_simd_chosen(void);
+
 /* Hamming distance between two LSH codes, each SIGIL_LSH_WORDS words. */
 static inline uint32_t sigil_hamming(const uint64_t *a, const uint64_t *b)
 {
