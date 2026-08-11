@@ -38,7 +38,12 @@ ifneq ($(OPENVINO_LIB),)
   OV_LIBS = $(OPENVINO_LIB) -Wl,-rpath,$(dir $(OPENVINO_LIB)) -lstdc++ -lm
 endif
 
-TABSRC = $(wildcard $(LIBTAB_SRC)/*.c) $(MONOCYPHER)/monocypher.c
+# Exclude stub_9pclient.c: it is a shim for callers that link libauth but not
+# lib9pclient (py-libtab), and it defines fsopen/fscreate/fswrite -- the same
+# names as this server's 9P callbacks in fs.c. sigilfs links the real
+# lib9pclient, so the stub both collides and is unnecessary.
+TABSRC = $(filter-out %/stub_9pclient.c,$(wildcard $(LIBTAB_SRC)/*.c)) \
+         $(MONOCYPHER)/monocypher.c
 TABOBJ = $(notdir $(TABSRC:.c=.o))
 
 all: sigilfs

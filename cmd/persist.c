@@ -149,6 +149,10 @@ store_commit(Sigilfs *f)
 	if(f->storepath == nil)
 		return "no store path: started without -f";
 
+	/* A queued paragraph still carries fallback bits; committing here
+	 * would persist them as though they were semantic. */
+	br_flush(f->store);
+
 	memset(cols, 0, sizeof cols);
 	cols[0].name = "path";
 	cols[1].name = "para";

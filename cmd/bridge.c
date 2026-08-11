@@ -39,7 +39,25 @@ struct bridge {
 	sigil_embedder_t *emb;
 	sigil_simhash_t sh;
 	int have_sh;
+
+	/* Pending batch. Records are pushed to the store immediately so their
+	 * indices are stable; only the LSH bits are deferred until the batch
+	 * flushes. Embedding one paragraph per inference reaches 200/s on an
+	 * Arc Pro B50 against 1833/s at a batch of 128 -- 9 hours for a 59.6M
+	 * paragraph corpus instead of 83. */
+	char **btext;         /* [Batchmax] owned copies */
+	size_t *blen;
+	long *bidx;           /* store index each text belongs to */
+	size_t bn;
 };
+
+/* Larger batches keep paying: 494/s at 16, 1833/s at 128, and 256 gains
+ * nothing. The tokenizer pads to the longest member, so a batch mixing very
+ * short and very long paragraphs wastes work -- but not enough to matter
+ * against the fixed cost of an inference call. */
+#define Batchmax 128
+
+void br_flush(void *p);
 
 void *
 br_new(void)
@@ -57,11 +75,16 @@ br_new(void)
 	b->paras = calloc(b->cap, sizeof *b->paras);
 	b->offs  = calloc(b->cap, sizeof *b->offs);
 	b->lens  = calloc(b->cap, sizeof *b->lens);
+	b->btext = calloc(Batchmax, sizeof *b->btext);
+	b->blen  = calloc(Batchmax, sizeof *b->blen);
+	b->bidx  = calloc(Batchmax, sizeof *b->bidx);
 	if (b->paths == NULL || b->paras == NULL ||
-	    b->offs == NULL || b->lens == NULL) {
+	    b->offs == NULL || b->lens == NULL ||
+	    b->btext == NULL || b->blen == NULL || b->bidx == NULL) {
 		sigil_store_free(&b->st);
 		free(b->paths); free(b->paras);
-		free(b->offs); free(b->lens); free(b);
+		free(b->offs); free(b->lens);
+		free(b->btext); free(b->blen); free(b->bidx); free(b);
 		return NULL;
 	}
 	return b;
@@ -145,6 +168,11 @@ br_free(void *p)
 	free(b->paras);
 	free(b->offs);
 	free(b->lens);
+	for (size_t k = 0; k < b->bn; k++)
+		free(b->btext[k]);
+	free(b->btext);
+	free(b->blen);
+	free(b->bidx);
 	sigil_store_free(&b->st);
 	free(b);
 }
@@ -191,7 +219,7 @@ br_add_at(void *p, const char *path, unsigned para, const void *text,
 {
 	struct bridge *b = p;
 	sigil_t s;
-	int i;
+	int i, defer = 0;
 
 	if (b->n == b->cap && grow(b) != 0)
 		return -1;
@@ -201,11 +229,18 @@ br_add_at(void *p, const char *path, unsigned para, const void *text,
 	if (lsh != NULL) {
 		for (i = 0; i < SIGIL_LSH_WORDS; i++)
 			s.lsh[i] = lsh[i];
+	} else if (b->emb != NULL && b->emb->embed_batch != NULL) {
+		/* Defer: queue the text and fill the bits when the batch
+		 * flushes. The record carries the byte-shingle fallback until
+		 * then, which is what it would have kept had embedding
+		 * failed. */
+		defer = 1;
 	} else if (b->emb != NULL) {
-		/* Real semantic bits. Failure here leaves the byte-shingle
-		 * fallback in place rather than dropping the record: a
-		 * paragraph that will not embed is still worth addressing by
-		 * content, it just will not be found by similarity. */
+		/* Backend with no batch path -- llama.cpp, the hash fallback.
+		 * Failure here leaves the byte-shingle bits rather than
+		 * dropping the record: a paragraph that will not embed is
+		 * still worth addressing by content, it just will not be found
+		 * by similarity. */
 		size_t dim = b->emb->dim(b->emb);
 		float *v = malloc(dim * sizeof *v);
 
@@ -223,7 +258,69 @@ br_add_at(void *p, const char *path, unsigned para, const void *text,
 	b->offs[b->n] = off;
 	b->lens[b->n] = (unsigned long)len;
 	b->n++;
+
+	if (defer) {
+		char *copy = malloc(len + 1);
+
+		if (copy == NULL)
+			return (long)(b->n - 1);   /* keeps fallback bits */
+		memcpy(copy, text, len);
+		copy[len] = '\0';
+		b->btext[b->bn] = copy;
+		b->blen[b->bn] = len;
+		b->bidx[b->bn] = (long)(b->n - 1);
+		b->bn++;
+		if (b->bn == Batchmax)
+			br_flush(b);
+	}
 	return (long)(b->n - 1);
+}
+
+/*
+ * Embed everything queued and write the bits into the records that are
+ * already in the store.
+ *
+ * Must be called before any read of the LSH field -- br_similar, a commit, a
+ * scan. Leaving it to the caller would make "the bits are wrong" depend on
+ * call order, so index.c calls it at the end of every file and store_commit
+ * calls it before writing.
+ */
+void
+br_flush(void *p)
+{
+	struct bridge *b = p;
+	size_t dim, i;
+	float *v;
+
+	if (b == NULL || b->bn == 0 || b->emb == NULL ||
+	    b->emb->embed_batch == NULL)
+		return;
+
+	dim = b->emb->dim(b->emb);
+	v = malloc(b->bn * dim * sizeof *v);
+	if (v != NULL) {
+		if (b->emb->embed_batch(b->emb, (const char **)b->btext,
+		                        b->blen, b->bn, v) > 0) {
+			for (i = 0; i < b->bn; i++) {
+				sigil_t s;
+
+				if (sigil_store_get(&b->st, (size_t)b->bidx[i],
+				                    &s) != 0)
+					continue;
+				sigil_simhash_project(&b->sh, v + i * dim,
+				                      s.lsh);
+				/* Write the bits back in place: the store is
+				 * struct-of-arrays, so only the lsh row moves. */
+				memcpy(b->st.lsh + (size_t)b->bidx[i] *
+				           SIGIL_LSH_WORDS,
+				       s.lsh, sizeof s.lsh);
+			}
+		}
+		free(v);
+	}
+	for (i = 0; i < b->bn; i++)
+		free(b->btext[i]);
+	b->bn = 0;
 }
 
 /* The one authority on the code width. cmd/ cannot include sigil.h, so

@@ -62,6 +62,14 @@ struct Impl {
 	// server, which is the whole point of doing this in C++.
 	ov::InferRequest tok;
 	bool have_tok = false;
+	/* Whether the model declares token_type_ids, decided once.
+	 *
+	 * This used to be a scan of model.inputs() inside the per-chunk loop,
+	 * calling get_any_name() on every input of every paragraph. That
+	 * constructs a std::string and resolves dynamic symbols each time:
+	 * measured at 1.45 ms per paragraph, which was 204/s versus 290/s
+	 * without it -- more than the model inference itself. */
+	bool need_token_type = false;
 };
 
 int embed_one(Impl *im, const char *text, size_t len, float *out);
@@ -123,13 +131,10 @@ int embed_one(Impl *im, const char *text, size_t len, float *out)
 		im->req.set_tensor("attention_mask", cmk);
 		// Some exports also want token_type_ids; feed zeros when the
 		// model declares it rather than failing the whole embed.
-		for (const auto &p : im->model.inputs()) {
-			if (p.get_any_name() == "token_type_ids") {
-				ov::Tensor tt(ov::element::i64, ov::Shape{1, n});
-				std::memset(tt.data<int64_t>(), 0,
-				            n * sizeof(int64_t));
-				im->req.set_tensor("token_type_ids", tt);
-			}
+		if (im->need_token_type) {
+			ov::Tensor tt(ov::element::i64, ov::Shape{1, n});
+			std::memset(tt.data<int64_t>(), 0, n * sizeof(int64_t));
+			im->req.set_tensor("token_type_ids", tt);
 		}
 		im->req.infer();
 
@@ -163,6 +168,148 @@ int embed_one(Impl *im, const char *text, size_t len, float *out)
 	for (size_t d = 0; d < im->dim; d++)
 		out[d] = static_cast<float>(acc[d] * norm);
 	return norm > 0.0 ? 0 : -1;
+}
+
+/*
+ * Embed n texts in one inference.
+ *
+ * Chunking happens inside the batch rather than beside it. A text over the
+ * position limit contributes several rows to the same inference, and its rows
+ * are averaged back together afterwards -- the same pool-then-renormalise the
+ * per-text path does, without falling out of the batch to do it.
+ *
+ * Truncating instead was measurably wrong: of 300 real paragraphs, the 7 over
+ * ~900 characters diverged from the per-text path by as much as 0.56 cosine
+ * while the other 293 matched within 0.001. A batch that silently drops the
+ * tail of a paragraph produces a vector for text the caller never asked about.
+ *
+ * The tokenizer pads to the longest member, so a batch mixing a 40-character
+ * paragraph with a 3000-character one wastes work on the short one. It still
+ * wins by a wide margin: the fixed cost of an inference call dominates a
+ * single median-length paragraph, and amortising it over 32 takes an Arc Pro
+ * B50 from 200 paragraphs/s to over 600.
+ */
+int ov_embed_batch(sigil_embedder_t *self, const char **texts,
+                   const size_t *lens, size_t n, float *out)
+{
+	Impl *im = static_cast<Impl *>(self->impl);
+
+	if (!im->have_tok || n == 0)
+		return -1;
+	try {
+		/* Tokenize whole texts first, then split the *token* sequence.
+		 * Splitting characters instead gives different boundaries than
+		 * embed_one(), which chunks after tokenizing -- that mismatch
+		 * showed up as 23 of 300 paragraphs disagreeing with the
+		 * per-text path instead of 0. */
+		ov::Tensor win(ov::element::string, ov::Shape{n});
+		for (size_t i = 0; i < n; i++)
+			win.data<std::string>()[i] = std::string(texts[i], lens[i]);
+		im->tok.set_input_tensor(win);
+		im->tok.infer();
+
+		ov::Tensor wids = im->tok.get_tensor("input_ids");
+		ov::Tensor wmsk = im->tok.get_tensor("attention_mask");
+		size_t WT = wids.get_shape()[1];
+
+		/* One row per chunk; owner[r] is the text row r belongs to. */
+		std::vector<size_t> owner, start, count;
+		for (size_t i = 0; i < n; i++) {
+			const int64_t *m = wmsk.data<int64_t>() + i * WT;
+			size_t real = 0;
+			while (real < WT && m[real] != 0)
+				real++;
+			if (real == 0)
+				real = 1;
+			for (size_t off = 0; off < real; off += Maxtokens) {
+				size_t len = real - off;
+				if (len > Maxtokens)
+					len = Maxtokens;
+				owner.push_back(i);
+				start.push_back(i * WT + off);
+				count.push_back(len);
+			}
+		}
+
+		size_t R = owner.size();
+		size_t Tuse = 0;
+		for (size_t r = 0; r < R; r++)
+			if (count[r] > Tuse)
+				Tuse = count[r];
+
+		ov::Tensor cid(ov::element::i64, ov::Shape{R, Tuse});
+		ov::Tensor cmk(ov::element::i64, ov::Shape{R, Tuse});
+		std::memset(cid.data<int64_t>(), 0, R * Tuse * sizeof(int64_t));
+		std::memset(cmk.data<int64_t>(), 0, R * Tuse * sizeof(int64_t));
+		for (size_t r = 0; r < R; r++) {
+			std::memcpy(cid.data<int64_t>() + r * Tuse,
+			            wids.data<int64_t>() + start[r],
+			            count[r] * sizeof(int64_t));
+			for (size_t t = 0; t < count[r]; t++)
+				cmk.data<int64_t>()[r * Tuse + t] = 1;
+		}
+		im->req.set_tensor("input_ids", cid);
+		im->req.set_tensor("attention_mask", cmk);
+		if (im->need_token_type) {
+			ov::Tensor tt(ov::element::i64, ov::Shape{R, Tuse});
+			std::memset(tt.data<int64_t>(), 0,
+			            R * Tuse * sizeof(int64_t));
+			im->req.set_tensor("token_type_ids", tt);
+		}
+		im->req.infer();
+
+		ov::Tensor hs = im->req.get_output_tensor(0);
+		const float *h = hs.data<const float>();
+		size_t dim = hs.get_shape()[2];
+
+		std::memset(out, 0, n * dim * sizeof *out);
+		std::vector<float> nchunk(n, 0.0f);
+
+		for (size_t r = 0; r < R; r++) {
+			const float *hr = h + r * Tuse * dim;
+			const int64_t *mr = cmk.data<int64_t>() + r * Tuse;
+			float *o = out + owner[r] * dim;
+			double tot = 0.0;
+			std::vector<float> v(dim, 0.0f);
+
+			/* Mean pool over real tokens only; padding must not
+			 * dilute, and the batch is padded to its longest row. */
+			for (size_t t = 0; t < Tuse; t++) {
+				if (mr[t] == 0)
+					continue;
+				tot += 1.0;
+				for (size_t d = 0; d < dim; d++)
+					v[d] += hr[t * dim + d];
+			}
+			if (tot <= 0.0)
+				continue;
+			for (size_t d = 0; d < dim; d++)
+				o[d] += static_cast<float>(v[d] / tot);
+			nchunk[owner[r]] += 1.0f;
+		}
+
+		/* Average a text's chunks, then renormalise. Averaging in
+		 * float space is the correct combiner: pooling packed codes
+		 * would destroy the locality that makes them useful. */
+		for (size_t i = 0; i < n; i++) {
+			float *o = out + i * dim;
+			double norm = 0.0;
+
+			if (nchunk[i] <= 0.0f)
+				continue;
+			for (size_t d = 0; d < dim; d++) {
+				o[d] /= nchunk[i];
+				norm += static_cast<double>(o[d]) * o[d];
+			}
+			norm = norm > 0.0 ? 1.0 / std::sqrt(norm) : 0.0;
+			for (size_t d = 0; d < dim; d++)
+				o[d] = static_cast<float>(o[d] * norm);
+		}
+		return static_cast<int>(n);
+	} catch (const std::exception &e) {
+		std::fprintf(stderr, "sigil: openvino batch: %s\n", e.what());
+		return -1;
+	}
 }
 
 size_t ov_dim(const sigil_embedder_t *self)
@@ -243,10 +390,18 @@ sigil_embedder_openvino(const char *model_dir, const char *device)
 			return nullptr;
 		im->dim = static_cast<size_t>(shape[2].get_length());
 
+		for (const auto &p : im->model.inputs()) {
+			if (p.get_any_name() == "token_type_ids") {
+				im->need_token_type = true;
+				break;
+			}
+		}
+
 		im->label = "openvino:" + im->device;
 
 		auto *e = new sigil_embedder_t;
-		e->embed   = ov_embed;
+		e->embed       = ov_embed;
+		e->embed_batch = ov_embed_batch;
 		e->dim     = ov_dim;
 		e->name    = ov_name;
 		e->destroy = ov_destroy;

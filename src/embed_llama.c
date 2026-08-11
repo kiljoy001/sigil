@@ -174,6 +174,7 @@ sigil_embedder_t *sigil_embedder_llama(const char *gguf_path)
 	}
 
 	e->embed   = llama_embed;
+	e->embed_batch = NULL;   /* no batch path; callers loop over embed() */
 	e->dim     = llama_dim;
 	e->name    = llama_name;
 	e->destroy = llama_destroy;
@@ -261,6 +262,7 @@ sigil_embedder_t *sigil_embedder_hash_nonsemantic(size_t dim)
 	}
 	im->dim   = dim;
 	e->embed   = hash_embed;
+	e->embed_batch = NULL;
 	e->dim     = hash_dim;
 	e->name    = hash_name;
 	e->destroy = hash_destroy;

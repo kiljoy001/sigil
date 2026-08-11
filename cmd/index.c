@@ -187,6 +187,9 @@ index_mount(Sigilfs *f, Mount *m)
 	free(d);
 
 	added = walk(f, m->root, 0, &nfiles);
+	/* Anything still queued must be embedded before the counters below
+	 * describe the store, and before a caller can scan it. */
+	br_flush(f->store);
 	m->lastscan = time(0);
 	f->nrecords = br_count(f->store);
 	f->nindexed += nfiles;

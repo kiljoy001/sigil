@@ -104,6 +104,10 @@ long br_add(void *b, const char *path, unsigned para, const void *text,
 long br_add_at(void *b, const char *path, unsigned para, const void *text,
                unsigned long len, const unsigned long long *lsh, unsigned ts,
                unsigned long off);
+/* Embed anything queued by br_add_at and write the bits into the store.
+ * Must run before any read of the LSH field -- a scan, a similarity query, or
+ * a commit -- or those records still carry the byte-shingle fallback. */
+void br_flush(void *b);
 unsigned long br_offset(void *b, long i);
 unsigned long br_length(void *b, long i);
 long br_add_hex(void *b, const char *path, unsigned para, const char *lshhex);

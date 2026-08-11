@@ -129,6 +129,10 @@ similar_walk(Sigilfs *f, char *hex, File **out)
 		return nil;
 	}
 
+	/* A scan reads the LSH field, so anything still queued has to be
+	 * embedded first or it would be compared on fallback bits. */
+	br_flush(f->store);
+
 	self = br_find_hash(f->store, hex);
 	if(self < 0){
 		snprint(err, sizeof err, "sigilfs: no such sigil");
