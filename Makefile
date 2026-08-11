@@ -88,7 +88,7 @@ CORPUS ?= test/data/corpus.txt
 PLAN9 ?= $(HOME)/Repo/plan9port
 LIBTAB_SRC ?= $(HOME)/Repo/objective-9c/libtab
 
-.PHONY: all check check-semantic eval corpus bench bench-mt clean sbom sigilfs
+.PHONY: all check check-semantic eval corpus bench bench-mt clean sbom sigilfs prop sanitize fuzz mutate
 
 all: $(LIB)
 
@@ -120,8 +120,68 @@ test/semantic: test/semantic.c $(LIB)
 test/eval: test/eval.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) -o $@ $(LDFLAGS) $(LLAMA_LDFLAGS) $(LDLIBS)
 
-check: test/differential
+check: test/differential test/unit
 	./test/differential
+	./test/unit
+
+THEFT ?= $(HOME)/Repo/libtab/tests/vendor/theft
+
+test/unit: test/unit.c $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< $(LIB) $(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS)
+
+# Property tests over generated operation sequences, compared against a plain
+# model. unit.c checks what someone thought to write down; these check what
+# must hold for every sequence, and report a shrunk counterexample when it
+# does not. theft is vendored in the libtab checkout.
+test/prop: test/prop.c $(LIB)
+	$(CC) -std=c99 -O1 -g -Iinclude -I$(THEFT)/inc -o $@ $< $(LIB) \
+		$(THEFT)/build/libtheft.a $(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS) -lpthread
+
+prop: test/prop
+	./test/prop
+
+# ASan + UBSan over both suites. libsigil only: OpenVINO dlopens TBB with
+# RTLD_DEEPBIND, which the sanitizer runtime refuses, and the logic worth
+# checking is all on this side of that boundary anyway.
+SANSRC = $(BLAKE3) src/sigil.c src/trit.c src/store.c src/scan_scalar.c \
+         src/scan_x86.c src/scan_sse.c src/scan_neon.c src/scan_generic.c \
+         src/scan_range.c src/simhash.c src/embed_llama.c
+SANFLAGS = -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+           -Iinclude -Ithird_party/blake3 -DBLAKE3_NO_AVX512 -DBLAKE3_NO_AVX2 \
+           -DBLAKE3_NO_SSE41 -DBLAKE3_NO_SSE2 -DBLAKE3_USE_NEON=0
+
+sanitize:
+	@mkdir -p build/san
+	$(CC) $(SANFLAGS) -c test/unit.c -o build/san/unit.o
+	$(CC) $(SANFLAGS) $(SANSRC) build/san/unit.o -o build/san/unit -lm
+	ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 ./build/san/unit
+	$(CC) $(SANFLAGS) -std=c99 -I$(THEFT)/inc -c test/prop.c -o build/san/prop.o
+	$(CC) $(SANFLAGS) $(SANSRC) build/san/prop.o $(THEFT)/build/libtheft.a \
+		-o build/san/prop -lpthread -lm
+	ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 ./build/san/prop
+
+# libFuzzer over the paths that eat untrusted bytes: the paragraph splitter,
+# the hash, the trit decoder, the scan. Needs a clang whose sanitizer runtimes
+# are installed -- clang-18 here; the newer build in PATH ships without them.
+FUZZCC ?= clang-18
+FUZZTIME ?= 120
+
+test/fuzz_sigil: test/fuzz_sigil.c
+	$(FUZZCC) -O1 -g -fsanitize=fuzzer,address,undefined -Iinclude \
+		-Ithird_party/blake3 -DBLAKE3_NO_AVX512 -DBLAKE3_NO_AVX2 \
+		-DBLAKE3_NO_SSE41 -DBLAKE3_NO_SSE2 -DBLAKE3_USE_NEON=0 \
+		$< $(BLAKE3) src/sigil.c src/trit.c src/store.c \
+		src/scan_scalar.c src/scan_x86.c src/scan_sse.c src/scan_neon.c \
+		src/scan_generic.c src/scan_range.c src/simhash.c -o $@
+
+fuzz: test/fuzz_sigil
+	@mkdir -p test/fuzz-corpus
+	./test/fuzz_sigil -max_total_time=$(FUZZTIME) test/fuzz-corpus
+
+# Prove the tests can fail. A suite that passes is not evidence until you
+# have watched it fail.
+mutate: test/unit test/prop
+	sh test/mutate.sh
 
 # The test that separates a semantic filesystem from a hashing one.
 check-semantic: test/semantic
