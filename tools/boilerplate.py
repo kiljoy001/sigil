@@ -40,15 +40,43 @@ import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-# The START/END lines. Tolerant of the observed spelling differences and of
-# trailing whitespace, anchored to a line so a mention inside the prose
-# cannot match.
+# The START/END lines. Tolerant of the observed spelling differences, of
+# trailing whitespace, and of leading indentation -- some files are
+# indented in their entirety, marker included:
+#
+#         The Project Gutenberg EBook of Sinister Street, vol. 1, ...
+#     *** START OF THIS PROJECT GUTENBERG EBOOK SINISTER STREET, VOL. 1 ***
+#
+# A pattern anchored hard at ^\*\*\* misses those and the whole licence
+# envelope survives into the indexed text. Measured over 4,000 books of the
+# cleaned corpus: 118 still carried licence text, and this is why.
+#
+# The title may also wrap. Gutenberg wrapped long ones at a fixed width,
+# so the closing *** lands on the next line:
+#
+#     ***START OF THE PROJECT GUTENBERG EBOOK THE CHAPEL OF THE HOLY SPIRIT IN
+#     THE CHURCH OF ST. PETER'S, ... ***
+#
+# A $-anchored pattern misses those. Both problems together account for
+# every leftover measured: of 4,000 cleaned books, 118 still carried
+# licence text, and after allowing indentation and a wrapped title, 0 do.
+#
+# Bounded {0,300} rather than .*? with DOTALL, so a file containing a
+# stray *** cannot run on and swallow the opening of the book. The
+# longest real marker in the mirror is comfortably inside that.
+#
+# The leading class includes U+FEFF: three books carry a BOM directly
+# before the marker on the same line, which clean.normalise_text does
+# not remove because it only strips one at position 0 of the file.
+#
+# Still anchored to a line start so a mention in running prose cannot
+# match.
 _START = re.compile(
-    r"^\*\*\*\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.*?\*\*\*\s*$",
-    re.IGNORECASE | re.MULTILINE)
+    r"^[﻿ \t]*\*\*\*\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.{0,300}?\*\*\*",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL)
 _END = re.compile(
-    r"^\*\*\*\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.*?\*\*\*\s*$",
-    re.IGNORECASE | re.MULTILINE)
+    r"^[﻿ \t]*\*\*\*\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.{0,300}?\*\*\*",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
 # "Produced by ..." credits sit immediately after the START marker and run
 # until a blank line. Transcription credit, not the work.
@@ -186,11 +214,35 @@ def _job(args):
     return (1, removed, None)
 
 
+# Files that sit in a book directory but are not the book. 11,382 of the
+# mirror's 157,106 .txt files are ancillary (7.2%), and 1,410 of those are
+# LICENSE.txt. Usually dedup discards them because the real text is
+# alongside, but where a title ships only as HTML or EPUB there is no
+# competing file -- and six books were indexed as MathJax build notes
+# before this filter existed, all sharing one digest.
+#
+# Matched by name rather than by pattern: legacy book names like
+# 8tgcm10.txt and 8rome10.txt are also non-numeric, and dropping those
+# would discard real books.
+_NOT_A_BOOK = frozenset({
+    "license.txt", "readme.txt", "readme-license.txt", "readme-math.txt",
+    "contents.txt", "instructions.txt", "cd-dvd-readme.txt",
+    "donate-howto.txt", "pnote.txt",
+})
+
+
+def is_book_file(path: Path) -> bool:
+    """Whether this file is a work rather than packaging around one."""
+    return path.name.lower() not in _NOT_A_BOOK
+
+
 def find_files(src: Path, ext: str = ".txt") -> list:
     """Every candidate file under src, in a reproducible order."""
-    return sorted(Path(r) / n
-                  for r, _d, fs in os.walk(src)
-                  for n in fs if n.endswith(ext))
+    return sorted(p for p in
+                  (Path(r) / n
+                   for r, _d, fs in os.walk(src)
+                   for n in fs if n.endswith(ext))
+                  if is_book_file(p))
 
 
 def select_books(all_files, keep_duplicates: bool = False) -> list:

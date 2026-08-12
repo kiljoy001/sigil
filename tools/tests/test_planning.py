@@ -207,7 +207,38 @@ class TestSummarise:
 
 # --- stage 2 planning ---------------------------------------------------
 
+class TestIsBookFile:
+    """1,410 LICENSE.txt files sit in book directories. Usually dedup
+    discards them because the real text is alongside -- but where a title
+    ships only as HTML or EPUB there is no competing file, and six books
+    were indexed as MathJax build notes before this filter existed."""
+
+    @pytest.mark.parametrize("name", [
+        "LICENSE.txt", "license.txt", "README.txt", "readme-license.txt",
+        "README-math.txt", "contents.txt", "donate-howto.txt",
+    ])
+    def test_packaging_is_rejected(self, name):
+        assert not boilerplate.is_book_file(Path(f"/g/1007/{name}"))
+
+    @pytest.mark.parametrize("name", [
+        "1007.txt", "1007-0.txt", "12823-8.txt",
+        # Legacy names, which are also non-numeric. Matching by pattern
+        # rather than by name would discard these real books.
+        "8tgcm10.txt", "8rome10.txt", "3ddcc10.txt", "1ddc809a.txt",
+    ])
+    def test_books_are_kept(self, name):
+        assert boilerplate.is_book_file(Path(f"/g/1007/{name}"))
+
+
 class TestFindFiles:
+    def test_ancillary_files_are_excluded(self, tmp_path):
+        (tmp_path / "1007.txt").write_text("book")
+        (tmp_path / "LICENSE.txt").write_text("licence")
+        (tmp_path / "README-math.txt").write_text("build notes")
+
+        found = boilerplate.find_files(tmp_path)
+        assert [f.name for f in found] == ["1007.txt"]
+
     def test_sorted_and_filtered(self, tmp_path):
         (tmp_path / "b.txt").write_text("x")
         (tmp_path / "a.txt").write_text("x")

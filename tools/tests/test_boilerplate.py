@@ -79,6 +79,83 @@ class TestMarkerVariants:
         assert "Real book text." in out
         assert "Title:" not in out
 
+    def test_indented_marker(self):
+        """Some files are indented in their entirety, marker included.
+
+        Found by measuring the cleaned corpus: 118 of 4,000 books still
+        carried licence text, and this was why -- a pattern anchored hard
+        at ^\\*\\*\\* misses an indented marker and the whole envelope
+        survives. Book 33797's -0 file is indented four spaces throughout;
+        its -8 and bare siblings are not, which is why the bug only
+        appeared for some revisions of the same book.
+        """
+        t = ("    Title: X\n\n"
+             "    *** START OF THIS PROJECT GUTENBERG EBOOK SINISTER STREET ***\n\n"
+             + BODY +
+             "\n    *** END OF THIS PROJECT GUTENBERG EBOOK SINISTER STREET ***\n"
+             "    Updated editions will replace the previous one.\n")
+        out = strip_boilerplate(t)
+        assert "Real book text." in out
+        assert "Title:" not in out
+        assert "Updated editions" not in out
+
+    def test_indented_start_alone(self):
+        """Each marker checked separately: indenting both hides a break in
+        either one, because END alone still bounds the body."""
+        t = ("Title: X\n\n"
+             "   *** START OF THIS PROJECT GUTENBERG EBOOK 1 ***\n\n" + BODY +
+             "\n*** END OF THIS PROJECT GUTENBERG EBOOK 1 ***\n")
+        out = strip_boilerplate(t)
+        assert "Real book text." in out
+        assert "Title:" not in out, "an indented START must still be found"
+
+    def test_indented_end_alone(self):
+        t = ("*** START OF THIS PROJECT GUTENBERG EBOOK 1 ***\n\n" + BODY +
+             "\n   *** END OF THIS PROJECT GUTENBERG EBOOK 1 ***\n"
+             "Updated editions will replace the previous one.\n")
+        out = strip_boilerplate(t)
+        assert "Real book text." in out
+        assert "Updated editions" not in out, "an indented END must be found"
+
+    def test_wrapped_marker_title(self):
+        """Gutenberg wrapped long titles, so the closing *** lands on the
+        next line. Together with indentation this accounts for every
+        leftover measured: 118 of 4,000 cleaned books carried licence
+        text, 0 after both fixes.
+        """
+        t = ("Character set encoding: UTF-8\n\n"
+             "***START OF THE PROJECT GUTENBERG EBOOK THE CHAPEL OF THE HOLY\n"
+             "SPIRIT IN THE CHURCH OF ST. PETER ***\n\n" + BODY +
+             "\n***END OF THE PROJECT GUTENBERG EBOOK THE CHAPEL ***\n"
+             "Updated editions will replace the previous one.\n")
+        out = strip_boilerplate(t)
+        assert "Real book text." in out
+        assert "Character set encoding" not in out
+        assert "Updated editions" not in out
+
+    def test_wrap_tolerance_is_bounded(self):
+        """A stray *** must not let the pattern run on and delete the
+        opening of the book. The bound is 300 characters; a scene break
+        far below the marker has to stay put."""
+        body = "Chapter one.\n\n" + "filler line\n" * 60 + "\n*** \n\n" + BODY
+        t = ("*** START OF THE PROJECT GUTENBERG EBOOK 1 ***\n\n" + body +
+             "\n*** END OF THE PROJECT GUTENBERG EBOOK 1 ***\n")
+        out = strip_boilerplate(t)
+        assert "Chapter one." in out
+        assert "Real book text." in out
+
+    def test_bom_before_the_marker(self):
+        """Three books carry a BOM directly before the marker, on the same
+        line. clean.normalise_text strips one only at position 0 of the
+        file, so this one survives into the text the splitter sees and the
+        marker no longer starts its line."""
+        t = ("\ufeff*** START OF THE PROJECT GUTENBERG EBOOK 1 ***\n\n"
+             + BODY +
+             "\n*** END OF THE PROJECT GUTENBERG EBOOK 1 ***\n")
+        out = strip_boilerplate(t)
+        assert "Real book text." in out
+        assert "PROJECT GUTENBERG" not in out
+
     def test_case_insensitive(self):
         t = wrap("*** start of the project gutenberg ebook x ***",
                  "*** end of the project gutenberg ebook x ***")

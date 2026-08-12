@@ -49,7 +49,7 @@ MUTANTS = [
     (
         "forget BOM stripping",
         "tools/clean.py",
-        '    if text.startswith("\ufeff"):',
+        '    if text.startswith("﻿"):',
         "    if False:",
     ),
 
@@ -105,14 +105,14 @@ MUTANTS = [
     (
         "only match THE, not THIS (START)",
         "tools/boilerplate.py",
-        r'r"^\*\*\*\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.*?\*\*\*\s*$"',
-        r'r"^\*\*\*\s*START OF THE PROJECT GUTENBERG EBOOK.*?\*\*\*\s*$"',
+        'r"^[\ufeff \\t]*\\*\\*\\*\\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.{0,300}?\\*\\*\\*"',
+        'r"^[\ufeff \\t]*\\*\\*\\*\\s*START OF THE PROJECT GUTENBERG EBOOK.{0,300}?\\*\\*\\*"',
     ),
     (
         "only match THE, not THIS (END)",
         "tools/boilerplate.py",
-        r'r"^\*\*\*\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.*?\*\*\*\s*$"',
-        r'r"^\*\*\*\s*END OF THE PROJECT GUTENBERG EBOOK.*?\*\*\*\s*$"',
+        'r"^[\ufeff \\t]*\\*\\*\\*\\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.{0,300}?\\*\\*\\*"',
+        'r"^[\ufeff \\t]*\\*\\*\\*\\s*END OF THE PROJECT GUTENBERG EBOOK.{0,300}?\\*\\*\\*"',
     ),
     (
         "require a space after the asterisks",
@@ -324,5 +324,29 @@ MUTANTS = [
         "tools/pipeline.py",
         "        if MIN_PARA <= len(p) <= MAX_PARA:",
         "        if len(p) <= MAX_PARA:",
+    ),
+    (
+        "boilerplate: index LICENSE.txt as a book",
+        "tools/boilerplate.py",
+        "    return path.name.lower() not in _NOT_A_BOOK",
+        "    return True",
+    ),
+    (
+        "boilerplate: START must not be indented",
+        "tools/boilerplate.py",
+        'r"^[\ufeff \\t]*\\*\\*\\*\\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.{0,300}?\\*\\*\\*"',
+        'r"^\\*\\*\\*\\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.{0,300}?\\*\\*\\*"',
+    ),
+    (
+        "boilerplate: END must not be indented",
+        "tools/boilerplate.py",
+        'r"^[\ufeff \\t]*\\*\\*\\*\\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.{0,300}?\\*\\*\\*"',
+        'r"^\\*\\*\\*\\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.{0,300}?\\*\\*\\*"',
+    ),
+    (
+        "boilerplate: no BOM allowed before the marker",
+        "tools/boilerplate.py",
+        'r"^[\ufeff \\t]*\\*\\*\\*\\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.{0,300}?\\*\\*\\*"',
+        'r"^[ \\t]*\\*\\*\\*\\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.{0,300}?\\*\\*\\*"',
     ),
 ]
