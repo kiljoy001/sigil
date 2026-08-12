@@ -288,4 +288,41 @@ MUTANTS = [
         'if row.get("Type") != "Text":',
         "if False:",
     ),
+
+    # --- tools/pipeline.py ----------------------------------------------
+    #
+    # The wiring is where this kind of program goes wrong: an ordering
+    # that wastes work, a resume that loses the record, a count that
+    # disagrees with what the indexer will do.
+    (
+        "pipeline: clean before dedup (wastes 2/3 of the work)",
+        "tools/pipeline.py",
+        "    chosen = boilerplate.select_books(all_files,\n"
+        "                                      keep_duplicates=keep_duplicates)",
+        "    chosen = all_files",
+    ),
+    (
+        "pipeline: skipped books get no manifest row",
+        "tools/pipeline.py",
+        "    for src, dst, book in done:",
+        "    for src, dst, book in []:",
+    ),
+    (
+        "pipeline: resume redoes current books",
+        "tools/pipeline.py",
+        "        if d.exists() and d.stat().st_mtime >= Path(src).stat().st_mtime:",
+        "        if False:",
+    ),
+    (
+        "pipeline: drop over-long paragraphs instead of chunking",
+        "tools/pipeline.py",
+        "            n += (len(p) + MAX_PARA - 1) // MAX_PARA",
+        "            pass",
+    ),
+    (
+        "pipeline: count paragraphs below the indexer's minimum",
+        "tools/pipeline.py",
+        "        if MIN_PARA <= len(p) <= MAX_PARA:",
+        "        if len(p) <= MAX_PARA:",
+    ),
 ]

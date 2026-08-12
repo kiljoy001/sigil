@@ -47,6 +47,15 @@ is unquoted on the way out.
 import sys
 from pathlib import Path
 
+import sys
+from pathlib import Path
+
+# Run either as `python -m tools.pipeline` or as `tools/pipeline.py`. The
+# latter puts tools/ on sys.path rather than the repo root, so the package
+# imports below would fail; this makes both work.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from tools.metadata import ndb_quote
 
 SCHEMA = "gutenberg-books"
@@ -115,13 +124,11 @@ class Manifest:
             self.path.unlink()
         cols = [libtab.Column(c) for c in COLUMNS]
         self._tab = libtab.Tabula.create(str(self.path), SCHEMA, cols)
-        self.n = 0
 
     def add(self, row):
         r = self._tab.add_row("book", ndb_quote(row["book"]))
         for col in COLUMNS[1:]:
             self._tab.set(r, col, ndb_quote(row.get(col, "")))
-        self.n += 1
 
     def close(self):
         self._tab.commit()

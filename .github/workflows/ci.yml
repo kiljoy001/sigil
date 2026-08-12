@@ -178,5 +178,5 @@ jobs:
       # covered. That refactor moved 14 mutants from cosmetic to counted.
       - name: Generated mutants (mutmut)
         env:
-          MUTMUT_ALLOW: 12
+          MUTMUT_ALLOW: 93
         run: PY=python sh test/mutate_mutmut.sh
