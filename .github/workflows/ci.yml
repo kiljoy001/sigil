@@ -158,12 +158,18 @@ jobs:
       - name: Curated mutants (must be 0 survivors)
         run: PY=python sh test/mutate_py.sh
 
-      # Generated set: a budget, not zero. ~95 survivors are in main() --
-      # print intervals and argparse help text -- plus mutations that are
-      # genuinely equivalent (Python codec names are case-insensitive, so
-      # "ascii" -> "ASCII" is undetectable by construction). Lower the
-      # number as survivors get fixed; raising it needs a reason.
+      # Generated set: a budget of 12, all of them verified-equivalent
+      # mutations (codec-name case, locale-default encoding, a uniform
+      # scaling that cannot change an ordering).
+      #
+      # main() is exempt. Not untestable -- test_cli.py covers it -- but
+      # what survives there is argparse help text and log wording, and a
+      # test that fails when someone improves a message trains people to
+      # ignore the suite. The numbers those messages carry are tested:
+      # format_report() and exit_status() were split out of main() so the
+      # counts, the error cap and the exit status are all mutable and
+      # covered. That refactor moved 14 mutants from cosmetic to counted.
       - name: Generated mutants (mutmut)
         env:
-          MUTMUT_ALLOW: 110
+          MUTMUT_ALLOW: 12
         run: PY=python sh test/mutate_mutmut.sh

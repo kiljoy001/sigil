@@ -214,6 +214,31 @@ def plan_jobs(chosen, dst: Path) -> list:
     return jobs
 
 
+def exit_status(errors) -> int:
+    """0 when every book was written, 1 when any failed."""
+    return 1 if errors else 0
+
+
+def format_report(written: int, removed_total: int, errors) -> str:
+    """The end-of-run summary, as a string rather than a print.
+
+    Bytes, not MB: header size varies from ~100 bytes (marker only) to
+    ~21 KB (full licence), so a MB figure rounds to 0.0 on small runs and
+    reads as "nothing happened" when the stage worked correctly. That
+    misreading actually happened, which is why the per-book average is
+    here too.
+    """
+    per = removed_total / max(written, 1)
+    lines = [f"\nwrote {written} books, stripped {removed_total:,} bytes "
+             f"of boilerplate ({per:,.0f} per book)"]
+    if errors:
+        lines.append(f"{len(errors)} errors:")
+        lines += [f"  {e}" for e in errors[:20]]
+        if len(errors) > 20:
+            lines.append(f"  ... and {len(errors) - 20} more")
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[2])
     ap.add_argument("src", type=Path, help="tree from tools/clean.py")
@@ -250,17 +275,8 @@ def main():
             if n % 2000 == 0:
                 print(f"  {n}/{len(jobs)}", file=sys.stderr)
 
-    # Bytes, not MB. Header size varies from ~100 bytes (marker only) to
-    # ~21 KB (full licence), so a MB figure rounds to 0.0 on small runs and
-    # reads as "nothing happened" when the stage worked correctly.
-    print(f"\nwrote {written} books, stripped {removed_total:,} bytes "
-          f"of boilerplate ({removed_total / max(written, 1):,.0f} per book)",
-          file=sys.stderr)
-    if errors:
-        print(f"{len(errors)} errors:", file=sys.stderr)
-        for e in errors[:20]:
-            print(f"  {e}", file=sys.stderr)
-    return 1 if errors else 0
+    print(format_report(written, removed_total, errors), file=sys.stderr)
+    return exit_status(errors)
 
 
 if __name__ == "__main__":

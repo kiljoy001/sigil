@@ -27,27 +27,33 @@
 #   * A skipped file in plan_jobs could `break` instead of `continue`,
 #     abandoning the rest of a resumed run.
 #
-# MUTMUT_ALLOW is the surviving count permitted. It is not zero and cannot
-# be. Of 510 generated mutants, 107 survive, and every one has been read:
+# What this gate counts, and what it deliberately does not.
 #
-#   95  main()          print intervals, progress counters, argparse help
-#                       text. Testable in principle, worth nothing: they
-#                       change what a log line says, not what the pipeline
-#                       does.
+# main() is excluded. Not because it is untestable -- it is tested, by
+# tools/tests/test_cli.py -- but because what survives there is argparse
+# help strings, progress-print intervals and log wording. Pinning those
+# means a test that fails when someone improves a message, which trains
+# people to ignore the suite. The numbers those messages carry are a
+# different matter and are tested: format_report() and exit_status() were
+# split out of main() precisely so the counts, the error cap and the exit
+# status are mutable and covered, leaving only the phrasing behind.
+#
+# Everything outside main() is counted, and the budget is small enough
+# that a new survivor is visible. The remainder are equivalent mutations,
+# each read and classified:
+#
 #    7  codec name case "utf-8" -> "UTF-8". Python's codec lookup is
-#                       case-insensitive, so no test can distinguish these.
-#                       Equivalent by construction.
-#    3  encoding=None   read_text/write_text default to the locale encoding,
-#                       which on this machine and on CI is UTF-8. A real
-#                       difference only under a non-UTF-8 locale, which the
-#                       pipeline does not support anyway.
-#    1  sum(1) -> sum(2)  scales every depth uniformly; the ordering the
-#                       comparison depends on is unchanged.
-#    1  pos < len -> <=  data[len(data):] is empty, decodes to "", breaks.
+#                       case-insensitive, so no test can distinguish
+#                       these. Equivalent by construction.
+#    3  encoding=None   read_text/write_text fall back to the locale
+#                       encoding, which is UTF-8 here and in CI.
+#    1  sum(1)->sum(2)  scales every depth uniformly; the ordering that
+#                       depends on it is unchanged.
+#    1  pos < len -> <= data[len(data):] is empty, decodes to "", breaks.
 #
-# The count came down from 130 by fixing eleven genuine gaps, not by
-# raising the number. Lower it when survivors are fixed; raising it is a
-# decision to record in the commit message.
+# The non-main count came down from 35 to 12 by fixing eleven genuine
+# gaps, not by widening the gate. Lower MUTMUT_ALLOW when survivors are
+# fixed; raising it is a decision to record in the commit message.
 #
 #	sh test/mutate_mutmut.sh
 #	mutmut show <id>     # what a specific survivor changed
@@ -63,7 +69,12 @@ MUTMUT="$(dirname "$PY")/mutmut"
 	exit 2
 }
 
-ALLOW=${MUTMUT_ALLOW:-110}
+ALLOW=${MUTMUT_ALLOW:-12}
+
+# Mutants inside these functions are reported but not counted against the
+# budget. Keep the list short and justified -- it is an admission that a
+# function is not worth mutating, which is only true for pure output.
+EXEMPT=${MUTMUT_EXEMPT:-x_main__}
 
 rm -rf .mutmut-cache mutants 2>/dev/null || true
 
@@ -82,15 +93,20 @@ fi
 # mutmut results lists only mutants that need attention -- survivors,
 # timeouts, no-tests. Killed ones are not printed, so the kill count comes
 # from the run's own tally rather than from this listing.
-survived=$(printf '%s\n' "$results" | grep -c ': survived$' || true)
+all_survived=$(printf '%s\n' "$results" | grep ': survived$' || true)
+counted=$(printf '%s\n' "$all_survived" | grep -v "$EXEMPT" || true)
+
+survived=$(printf '%s\n' "$counted" | grep -c . || true)
+exempt=$(printf '%s\n' "$all_survived" | grep -c "$EXEMPT" || true)
 notests=$(printf '%s\n' "$results" | grep -c ': no tests$' || true)
 timeouts=$(printf '%s\n' "$results" | grep -c ': timeout$' || true)
 
-printf '%s\n' "$results" | grep ': survived$' | \
+printf '%s\n' "$counted" | grep . | \
 	sed -E 's/.*\.x_?([a-z_]+)__mutmut.*/\1/' | sort | uniq -c | sort -rn
 
 echo
-echo "survived $survived, no-tests $notests, timeouts $timeouts (allowed: $ALLOW survivors)"
+echo "survived $survived (counted), $exempt exempt in $EXEMPT,"
+echo "no-tests $notests, timeouts $timeouts (allowed: $ALLOW)"
 
 # A mutant with no test covering it at all is never acceptable, whatever
 # the survivor allowance: it means a function the suite does not execute.
@@ -103,7 +119,8 @@ fi
 
 if [ "$survived" -gt "$ALLOW" ]; then
 	echo
-	echo "FAIL: $survived survivors, $ALLOW allowed." >&2
+	echo "FAIL: $survived counted survivors, $ALLOW allowed." >&2
+	printf '%s\n' "$counted" | head -20 >&2
 	echo "Inspect with: mutmut show <id>" >&2
 	echo "Each is a gap in the tests or an equivalent mutation." >&2
 	exit 1

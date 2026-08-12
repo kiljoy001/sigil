@@ -221,6 +221,33 @@ def summarise(results) -> tuple:
     return counts, changed, errors
 
 
+def exit_status(errors) -> int:
+    """0 when every file was processed, 1 when any failed.
+
+    A one-line function on purpose: it is the whole contract between a
+    pipeline run and the shell, and it belongs where a test can see it
+    rather than buried at the end of main().
+    """
+    return 1 if errors else 0
+
+
+def format_report(nfiles: int, changed: int, counts: dict, errors) -> str:
+    """The end-of-run summary, as a string.
+
+    Built and returned rather than printed so the numbers can be tested.
+    Only the first 20 errors are shown: a run against a wrong directory
+    can fail on every file, and 60,830 tracebacks is not a report.
+    """
+    lines = [f"\nprocessed {nfiles} files, {changed} changed"]
+    lines += [f"  {k:10s} {counts[k]}" for k in sorted(counts)]
+    if errors:
+        lines.append(f"\n{len(errors)} errors:")
+        lines += [f"  {e}" for e in errors[:20]]
+        if len(errors) > 20:
+            lines.append(f"  ... and {len(errors) - 20} more")
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[2])
     ap.add_argument("src", type=Path)
@@ -248,15 +275,9 @@ def main():
                 print(f"  {done}/{len(jobs)}", file=sys.stderr)
 
     counts, changed, errors = summarise(results)
-    print(f"\nprocessed {len(results)} files, {changed} changed",
+    print(format_report(len(results), changed, counts, errors),
           file=sys.stderr)
-    for k in sorted(counts):
-        print(f"  {k:10s} {counts[k]}", file=sys.stderr)
-    if errors:
-        print(f"\n{len(errors)} errors:", file=sys.stderr)
-        for e in errors[:20]:
-            print(f"  {e}", file=sys.stderr)
-    return 1 if errors else 0
+    return exit_status(errors)
 
 
 if __name__ == "__main__":
