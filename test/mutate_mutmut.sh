@@ -27,12 +27,27 @@
 #   * A skipped file in plan_jobs could `break` instead of `continue`,
 #     abandoning the rest of a resumed run.
 #
-# MUTMUT_ALLOW is the surviving count permitted. It is not zero and should
-# not be: ~95 survivors live in main() and are print intervals, argparse
-# help strings and other cosmetics, plus genuinely equivalent mutations
-# (Python's codec names are case-insensitive, so "ascii" -> "ASCII" cannot
-# be detected by any test). Lower it when survivors are fixed; raising it is
-# a decision to record in the commit message.
+# MUTMUT_ALLOW is the surviving count permitted. It is not zero and cannot
+# be. Of 510 generated mutants, 107 survive, and every one has been read:
+#
+#   95  main()          print intervals, progress counters, argparse help
+#                       text. Testable in principle, worth nothing: they
+#                       change what a log line says, not what the pipeline
+#                       does.
+#    7  codec name case "utf-8" -> "UTF-8". Python's codec lookup is
+#                       case-insensitive, so no test can distinguish these.
+#                       Equivalent by construction.
+#    3  encoding=None   read_text/write_text default to the locale encoding,
+#                       which on this machine and on CI is UTF-8. A real
+#                       difference only under a non-UTF-8 locale, which the
+#                       pipeline does not support anyway.
+#    1  sum(1) -> sum(2)  scales every depth uniformly; the ordering the
+#                       comparison depends on is unchanged.
+#    1  pos < len -> <=  data[len(data):] is empty, decodes to "", breaks.
+#
+# The count came down from 130 by fixing eleven genuine gaps, not by
+# raising the number. Lower it when survivors are fixed; raising it is a
+# decision to record in the commit message.
 #
 #	sh test/mutate_mutmut.sh
 #	mutmut show <id>     # what a specific survivor changed
@@ -48,7 +63,7 @@ MUTMUT="$(dirname "$PY")/mutmut"
 	exit 2
 }
 
-ALLOW=${MUTMUT_ALLOW:-135}
+ALLOW=${MUTMUT_ALLOW:-110}
 
 rm -rf .mutmut-cache mutants 2>/dev/null || true
 

@@ -165,5 +165,5 @@ jobs:
       # number as survivors get fixed; raising it needs a reason.
       - name: Generated mutants (mutmut)
         env:
-          MUTMUT_ALLOW: 135
+          MUTMUT_ALLOW: 110
         run: PY=python sh test/mutate_mutmut.sh

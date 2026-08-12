@@ -82,6 +82,42 @@ class TestValidInputUnchanged:
             "line one\nline two\n"
 
 
+class TestAdjacentBadBytes:
+    """Runs of consecutive invalid bytes, not just isolated ones.
+
+    Gutenberg files have runs of them: a mis-encoded quoted phrase puts
+    CP1252 bytes next to other punctuation.
+
+    Note on _repair()'s join separator, which generated mutation testing
+    flags as a survivor: Python's decoder reports each bad byte as its
+    own one-byte span, so _repair() is never handed more than one byte
+    through the public path and the separator is unreachable there.
+    test_repair_joins_a_multi_byte_span below calls it directly, which is
+    the only way to pin that behaviour honestly.
+    """
+
+    def test_two_adjacent_cp1252_bytes(self):
+        assert normalise_bytes(b"\x92\x93") == "\u2019\u201c"
+
+    def test_run_of_bad_bytes(self):
+        assert normalise_bytes(b"a\x92\x93\x94b") == "a\u2019\u201c\u201db"
+
+    def test_adjacent_latin1_bytes(self):
+        assert normalise_bytes(b"\xe9\xe8") == "\u00e9\u00e8"
+
+    def test_repair_joins_a_multi_byte_span(self):
+        """_repair() concatenates, with nothing between the characters.
+
+        Called directly because the decoder never hands it a span longer
+        than one byte. If a future change batches spans, this is what
+        stops a separator appearing in the middle of the text.
+        """
+        from tools.clean import _repair
+
+        assert _repair(b"\x92\x93\x94") == "\u2019\u201c\u201d"
+        assert _repair(b"\xe9\xe8") == "\u00e9\u00e8"
+
+
 class TestLatin1:
     """Files that are genuinely Latin-1, not CP1252."""
 
@@ -188,3 +224,18 @@ class TestClassify:
         # 0xE9 with no C1 bytes present: indistinguishable from CP1252 by
         # rule, and Latin-1 is the safer label since the mapping agrees.
         assert classify_encoding(b"caf\xe9") in ("latin-1", "cp1252")
+
+    def test_c1_range_boundaries(self):
+        """The CP1252/Latin-1 split is 0x80-0x9F inclusive at both ends.
+
+        Four generated mutants shifted this range by one byte each and
+        all survived, because every test used 0x92 -- comfortably inside
+        it. Only the label changes, and nothing downstream reads the
+        label, but it is the summary a 60,830-file run prints and an
+        off-by-one here would misreport what the corpus contains.
+        """
+        assert classify_encoding(b"a\x80b") == "cp1252", "0x80 is inclusive"
+        assert classify_encoding(b"a\x9fb") == "cp1252", "0x9F is inclusive"
+        assert classify_encoding(b"a\xa0b") == "latin-1", "0xA0 is outside"
+        # 0x7F is ASCII, so it cannot reach the C1 test at all.
+        assert classify_encoding(b"a\x7fb") == "ascii"

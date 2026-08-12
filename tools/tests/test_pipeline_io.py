@@ -59,6 +59,22 @@ class TestCleanFile:
         assert dst.exists(), "unchanged files must still be copied through"
         assert dst.read_bytes() == b"already clean ascii"
 
+    def test_rerun_into_existing_directory(self, tmp_path):
+        """Writing into a directory that already exists must not raise.
+
+        Found by generated mutation testing: exist_ok=True could be
+        flipped to False and every test still passed, because each one
+        used a fresh tmp_path. On a resumed run the output directories
+        are already there, so this would fail on the second invocation
+        over a corpus -- exactly when it is least convenient.
+        """
+        src = tmp_path / "in.txt"
+        src.write_bytes(b"hello")
+        dst = tmp_path / "out" / "in.txt"
+
+        assert clean.clean_file(src, dst)[2] is None
+        assert clean.clean_file(src, dst)[2] is None, "second run must work"
+
     def test_dry_run_writes_nothing(self, tmp_path):
         src = tmp_path / "in.txt"
         dst = tmp_path / "out" / "in.txt"
@@ -162,6 +178,56 @@ class TestBoilerplateJob:
             (str(tmp_path / "gone.txt"), str(tmp_path / "o.txt")))
         assert wrote == 0
         assert err is not None
+        assert removed == 0
+
+    def test_removed_is_the_difference_not_the_sum(self, tmp_path):
+        """Bytes removed must be input minus output.
+
+        Found by generated mutation testing: `len(text) - len(out)`
+        became `+` and every test still passed, because all of them only
+        asserted `removed > 0`. The sum is always positive too, so the
+        run would report stripping more boilerplate than the file
+        contained.
+        """
+        src = tmp_path / "1.txt"
+        body = "Body here.\n"
+        text = ("*** START OF THE PROJECT GUTENBERG EBOOK 1 ***\n\n"
+                + body +
+                "\n*** END OF THE PROJECT GUTENBERG EBOOK 1 ***\n")
+        src.write_text(text, encoding="utf-8")
+        dst = tmp_path / "out.txt"
+
+        wrote, removed, err = boilerplate._job((str(src), str(dst)))
+
+        assert err is None
+        assert removed == len(text) - len(dst.read_text(encoding="utf-8"))
+        assert removed < len(text)
+
+    def test_rerun_into_existing_directory(self, tmp_path):
+        """Same as the stage-1 case: a resumed run writes into
+        directories that already exist."""
+        src = tmp_path / "1.txt"
+        src.write_text("some text", encoding="utf-8")
+        dst = tmp_path / "out" / "1.txt"
+
+        assert boilerplate._job((str(src), str(dst)))[2] is None
+        assert boilerplate._job((str(src), str(dst)))[2] is None
+
+    def test_creates_nested_destination_directories(self, tmp_path):
+        """The output tree does not exist yet, so mkdir must recurse.
+
+        Found by generated mutation testing: parents=True could be
+        flipped to False and nothing failed, because every test wrote
+        into a directory that already existed one level down.
+        """
+        src = tmp_path / "1.txt"
+        src.write_text("some text", encoding="utf-8")
+        dst = tmp_path / "a" / "b" / "c" / "1.txt"
+
+        wrote, removed, err = boilerplate._job((str(src), str(dst)))
+
+        assert err is None
+        assert dst.exists()
 
     def test_failed_write_is_not_counted_as_written(self, tmp_path):
         """A book that could not be written must not be reported as one
@@ -183,6 +249,9 @@ class TestBoilerplateJob:
 
         assert err is not None
         assert wrote == 0
+        # Both fields, not just the first: a mutant that changed only the
+        # byte count survived a test that checked only the book count.
+        assert removed == 0
 
     def test_invalid_utf8_source_is_reported(self, tmp_path):
         """Stage 2 reads UTF-8 because stage 1 guarantees it. If someone

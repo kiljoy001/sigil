@@ -50,6 +50,25 @@ class TestCleanPlanJobs:
         assert len(jobs) == 1
         assert jobs[0][0].endswith("keep.txt")
 
+    def test_a_wrong_extension_does_not_stop_the_walk(self, tmp_path):
+        """Skipping a non-.txt file must not abandon the directory.
+
+        There are two `continue` statements in plan_jobs -- this one and
+        the resume check -- and generated mutation testing caught that
+        only the second was covered. Sorted order matters here: the
+        skipped file has to come first for continue and break to differ,
+        which is why "a.zip" is named as it is.
+        """
+        src = tmp_path / "s"
+        src.mkdir()
+        (src / "a.zip").write_text("x")      # sorts first, is skipped
+        (src / "b.txt").write_text("x")
+        (src / "c.txt").write_text("x")
+
+        jobs = clean.plan_jobs(src, tmp_path / "d")
+        names = sorted(Path(s).name for s, _d, _dr in jobs)
+        assert names == ["b.txt", "c.txt"]
+
     def test_destination_mirrors_source_layout(self, tmp_path):
         src = tmp_path / "s"
         (src / "1007").mkdir(parents=True)
@@ -69,6 +88,25 @@ class TestCleanPlanJobs:
         t = time.time() + 10
         import os
         os.utime(out, (t, t))
+
+        assert clean.plan_jobs(src, dst) == []
+
+    def test_equal_mtimes_count_as_done(self, tmp_path):
+        """A destination with the same mtime as its source is up to date.
+
+        Found by generated mutation testing: >= became > and nothing
+        failed, because every test had a strict difference. Equal mtimes
+        are the common case for a copied tree, and the mutant would make
+        every resumed run redo the entire corpus.
+        """
+        import os
+        src, dst = tmp_path / "s", tmp_path / "d"
+        src.mkdir(); dst.mkdir()
+        (src / "a.txt").write_text("x")
+        (dst / "a.txt").write_text("x")
+        t = 1_700_000_000
+        os.utime(src / "a.txt", (t, t))
+        os.utime(dst / "a.txt", (t, t))
 
         assert clean.plan_jobs(src, dst) == []
 

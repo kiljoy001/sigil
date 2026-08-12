@@ -145,6 +145,20 @@ class TestContentPreserved:
         assert "Chapter two." in out
         assert "* * *" in out
 
+    def test_leading_indentation_is_preserved(self):
+        """Only newlines are trimmed, not all whitespace.
+
+        Found by generated mutation testing: strip("\\n") became
+        strip(None) and nothing failed, because no test had a book whose
+        first line was indented. Verse and quoted passages are, and the
+        indentation is part of the text -- eating it changes the
+        paragraph and therefore its hash.
+        """
+        t = ("*** START OF THE PROJECT GUTENBERG EBOOK 1 ***\n\n"
+             "   indented first line\n\n"
+             "*** END OF THE PROJECT GUTENBERG EBOOK 1 ***\n")
+        assert strip_boilerplate(t).startswith("   indented")
+
     def test_empty_input(self):
         assert strip_boilerplate("") == ""
 
@@ -240,13 +254,23 @@ class TestPickBest:
     def test_suffix_recognition_is_exact(self):
         """The suffix test must actually match "-0", not any string.
 
-        A mutant that replaced the literal with nonsense survived: no
-        test distinguished "recognises -0" from "recognises nothing",
-        because with every candidate unrecognised the ranking still
-        happened to pick the same file by tie-break.
+        Checked through _rank rather than pick_best: if the literal is
+        replaced with nonsense, -0 falls through to the plain-ASCII rank,
+        and pick_best still returns the same file because the filename
+        tie-break happens to order it first. The test would pass while
+        the encoding preference had stopped working entirely, which is
+        precisely the mutant that survived until this was rewritten.
         """
-        assert pick_best([Path("/g/1/1-8.txt"), Path("/g/1/1-0.txt")]) == \
-            Path("/g/1/1-0.txt")
+        assert _rank(Path("/g/1/1-0.txt"))[1] == 0, "-0 is the UTF-8 rank"
+        assert _rank(Path("/g/1/1.txt"))[1] == 1, "bare is the ASCII rank"
+        assert _rank(Path("/g/1/1-8.txt"))[1] == 2, "-8 is the 8-bit rank"
+        assert _rank(Path("/g/1/1-5.txt"))[1] == 3, "-5 is the Big-5 rank"
+
+        # And the ranks are strictly ordered, not merely distinct.
+        ranks = [_rank(Path(f"/g/1/1{sfx}.txt"))[1]
+                 for sfx in ("-0", "", "-8", "-5")]
+        assert ranks == sorted(ranks) and len(set(ranks)) == 4
+
         assert pick_best([Path("/g/1/1-5.txt"), Path("/g/1/1-8.txt")]) == \
             Path("/g/1/1-8.txt")
 
