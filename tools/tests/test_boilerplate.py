@@ -221,6 +221,31 @@ class TestBookId:
     def test_id_from_directory(self, path, expected):
         assert book_id(Path(path)) == expected
 
+    @pytest.mark.parametrize("path,expected", [
+        # A file sitting directly in a fanout directory. The deepest
+        # numeric component is the single digit 0, so a directory-only
+        # rule files this book as "0". Eighteen real files do this.
+        ("/g/1/6/0/1602.txt", "1602"),
+        ("/g/1/5/9/1598.txt", "1598"),
+        ("/g/1/3/0/3/13032.txt", "13032"),
+        ("/g/1/2/8/2/12823-0.txt", "12823"),
+        # A file in the wrong book's directory. No directory rule gets
+        # this right; four real files do it.
+        ("/g/1/6/5/2/16529/16520.txt", "16520"),
+    ])
+    def test_filename_wins_over_a_misleading_directory(self, path, expected):
+        """Found by running the pipeline over the whole mirror: 22 books
+        were filed under the wrong id, eighteen of them under a single
+        fanout digit. Verified corpus-wide that preferring the filename
+        introduces no collisions."""
+        assert book_id(Path(path)) == expected
+
+    def test_legacy_names_still_use_the_directory(self):
+        """The filename only wins when it is itself a book number. These
+        are why the directory rule existed in the first place."""
+        assert book_id(Path("/g/1007/old/old/3ddcc10.txt")) == "1007"
+        assert book_id(Path("/g/1009/old/old/1ddc809a.txt")) == "1009"
+
 
 class TestPickBest:
     """One file per book, preferring UTF-8 and the current revision."""

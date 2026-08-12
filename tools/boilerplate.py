@@ -97,14 +97,34 @@ def strip_boilerplate(text: str) -> str:
 
 _BOOKDIR = re.compile(r"^\d+$")
 
+# A filename that is itself a book number: 1602.txt, 12823-0.txt.
+# The suffix is the encoding variant, not part of the id.
+_BOOKFILE = re.compile(r"^(\d+)(?:-\d+)?$")
+
 
 def book_id(path: Path) -> str | None:
-    """The book number, taken from the deepest numeric directory.
+    """The book number.
 
-    Not the filename: old/old/3ddcc10.txt belongs to book 1007 and its name
-    says otherwise. Gutenberg's layout is <digits>/<id>/[old/[old/]]<file>,
-    so the id is the last all-digit path component.
+    The filename wins when it is itself a book number -- 1602.txt or
+    12823-0.txt -- because it carries the actual Text#. The directory is
+    the fallback for legacy names that do not: old/old/3ddcc10.txt belongs
+    to book 1007 and its name says otherwise.
+
+    The directory alone is not enough, and preferring it was wrong for 22
+    files in the mirror. Gutenberg's layout is normally
+    <fanout digits>/<id>/<file>, but some files sit directly in the fanout
+    directory -- /1/6/0/1602.txt -- where the deepest numeric component is
+    the single digit 0, so eighteen books were filed under ids like "0"
+    and "9". Four more sit in the wrong book's directory entirely
+    (16529/16520.txt), which no directory rule can get right.
+
+    Verified across the whole mirror: preferring the filename produces no
+    id collisions.
     """
+    m = _BOOKFILE.match(path.stem)
+    if m:
+        return m.group(1)
+
     for part in reversed(path.parent.parts):
         if _BOOKDIR.match(part):
             return part
