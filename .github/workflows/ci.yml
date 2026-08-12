@@ -105,7 +105,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install test dependencies
-        run: pip install pytest hypothesis pytest-cov
+        run: pip install pytest hypothesis pytest-cov libtab blake3
 
       # Property tests included: encoding repair is exactly the kind of code
       # where the case you did not think of is the one in the corpus.
@@ -158,7 +158,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install test dependencies
-        run: pip install pytest hypothesis mutmut
+        run: pip install pytest hypothesis mutmut libtab blake3
 
       # Curated set: every mutant must die. A survivor here means a
       # mistake we specifically anticipated is no longer detected.

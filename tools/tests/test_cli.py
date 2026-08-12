@@ -14,6 +14,7 @@ These call main() in-process with argv patched, rather than spawning a
 subprocess, so the coverage build sees the lines.
 """
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -22,6 +23,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools import boilerplate, clean, manifest, metadata
+
+# manifest.py needs libtab; the rest of this file does not. CI installs it,
+# but a bare checkout should skip these rather than fail.
+_needs_libtab = pytest.mark.skipif(
+    importlib.util.find_spec("libtab") is None,
+    reason="libtab not installed")
 
 
 def run(module, argv, monkeypatch):
@@ -233,6 +240,7 @@ class TestMetadataCli:
         assert e.value.code != 0
 
 
+@_needs_libtab
 class TestManifestCli:
     """manifest.py doubles as the check on a completed run: how many books
     were written, how many joined the catalogue, and how many share a
