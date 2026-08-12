@@ -88,9 +88,10 @@ simply not co-cited.
 
 Project Gutenberg has no citation graph, so the external judgement is the Library
 of Congress subject headings — a cataloguer decided two books are about the same
-thing, without reference to any embedding. The full corpus is mirrored — 60,830
-books, **59,618,093 paragraphs**, a 3.8 GB store — and the retrieval numbers below
-are from 20,000 paragraphs across 210 books of it:
+thing, without reference to any embedding. The mirror is cleaned and deduplicated
+by `tools/pipeline.py` into **79,133 books and 77,367,817 paragraphs**, 98.2% of
+them carrying an LoCC class; the retrieval numbers below are from 20,000
+paragraphs across 210 books of it:
 
 | method | R@1 | R@10 | R@20 |
 |---|---|---|---|
@@ -112,6 +113,46 @@ them into one number hides this.
 0.199.** Subject matching runs about twice style matching, so the embedder is not
 merely recognising prose voice. Without that control the headline number would not
 be evidence of anything.
+
+### The corpus needed cleaning before it could be indexed
+
+A raw Gutenberg mirror is not a corpus. `tools/pipeline.py` turns 155,616 files
+into 79,133 books in about 150 seconds, and each stage exists because of a
+measured defect rather than tidiness:
+
+| stage | what it fixes |
+|---|---|
+| encoding | Windows-1252 bytes inside files served as UTF-8 |
+| deduplication | 76,483 superseded revisions and alternate encodings |
+| boilerplate | a licence envelope on every file, the corpus's most common text |
+| manifest | provenance and catalogue metadata, one libtab row per book |
+
+The encoding stage is not cosmetic. Invalid UTF-8 reaching PCRE2 inside
+openvino_tokenizers is documented undefined behaviour, and it read wild memory —
+segfaulting the indexer on 8 runs in 12 with identical input. That looked exactly
+like a race and was chased as one for most of a session. It was ASLR: whether the
+wild read lands on an unmapped page depends on where the allocator put things.
+`setarch -R` turns the crash into 8/8 and ends the guessing. Both the corpus fix
+and a guard at the embedder boundary are in; the crash rate on cleaned data with
+ASLR off is 0/5.
+
+Four more bugs appeared only at full scale, none of which a 331-file test corner
+could have shown:
+
+- **Books overwriting each other.** `book_id()` took the deepest numeric directory,
+  but some files sit directly in a fanout directory — `1/6/0/1602.txt` has no
+  per-book subdirectory, so its id read as `0`. Books sharing a bogus id
+  overwrote each other; a trial slice went from 11,029 books to 11,145 once the
+  filename took precedence.
+- **Packaging indexed as books.** 11,382 of the mirror's `.txt` files are not works
+  (1,410 are `LICENSE.txt`). Where a title ships only as HTML there is no competing
+  file, and six books were indexed as MathJax build instructions.
+- **Three marker forms** the licence stripper missed: indented, wrapped across a
+  line, and preceded by a BOM. Leftover licence text went from 2.95% of books
+  to 0.025%; the two that remain are defects in Gutenberg's own files.
+- **A resume that destroyed its own record.** The manifest is rewritten whole each
+  run, so a second pass that skipped every book wrote an empty manifest beside a
+  full tree. Caught by the test written for exactly that trap, on its first run.
 
 ### Exact identity where a grammar exists
 
@@ -387,6 +428,26 @@ legal and round-trip, and all 64807 remaining 16-bit values are rejected as
 corruption. A 2-bit scheme would waste a quarter of its encoding space and silently
 decode corruption as valid data.
 
+The Python pipeline carries its own suite: 280 tests at 96% coverage, property
+tests over generated input, and mutation testing in two sets. `test/mutate_py.sh`
+runs 47 mutants chosen by hand — mistakes a person could plausibly make here —
+and every one must die. `test/mutate_mutmut.sh` runs several hundred that nobody
+chose. Both matter, because the curated set can only cover failures someone
+imagined, and the crash that started this work was not one of them. The generated
+set found five real gaps the curated set missed, including a function the process
+pool calls that had no test at all.
+
+Property tests found three values libtab cannot store — an ASCII quote has no
+escape, control characters end the record, and the token `nil` reads back as
+absent — each of which writes a file that looks fine and fails when something
+later opens it. Filed upstream as libtab#1; the pipeline substitutes rather than
+corrupting.
+
+CI gates all of it: the C suite with and without sanitizers, a 90% coverage floor
+on both languages, CRAP score with zero functions permitted over 30, and both
+mutation suites. Every gate has been verified to fail when it should — a gate
+that cannot fail is decoration.
+
 ## Status
 
 Working end to end: the 64-byte layout, BLAKE3 identity, trit packing, the
@@ -402,10 +463,9 @@ Not built:
   BLAKE3 makes "has this changed" a cheap comparison; it is simply not wired up.
 - **Classification in the namespace.** The two-pass classifier works in `tools/` and
   is measured, but nothing projects its themes into the filesystem yet.
-- **A full-corpus run.** The corpus is mirrored and extracted — 60,830 books,
-  59,618,093 paragraphs — but every retrieval number here is still from a 20,000
-  paragraph sample of it. Embedding the whole thing is ~14 hours on the Arc, or ~11
-  with the CPU working alongside it, and that — not the 12 ms scan — is the
+- **A full-corpus run.** In progress at the time of writing: 77,367,817 paragraphs
+  at ~1,900 records/s, about 11 hours on the Arc. Every retrieval number above is
+  still from a 20,000 paragraph sample. Embedding — not the 12 ms scan — is the
   bottleneck by four orders of magnitude.
 
 Four bugs were found only by running this, not by reading it, and all four are in
@@ -432,6 +492,10 @@ tools/xlsx_ast.py '=SUM(A1,B1)' '=SUM(B1,A1)'   # same hash: SUM commutes
 tools/math_ast.py                                # LaTeX -> canonical tree hash
 tools/gutenberg.py pg_catalog.csv /mirror        # corpus -> paragraphs + metadata
 bench/gutenberg_eval.py paragraphs.csv           # retrieval vs subject headings
+
+# The corpus pipeline: raw mirror -> indexable books + a manifest.
+tools/pipeline.py /mirror /books --catalog pg_catalog.csv -j 12
+tools/manifest.py /books/manifest.tab            # summary, or one book by id
 ```
 
 `bench/` holds the measurement scripts behind every number above, including the ones
