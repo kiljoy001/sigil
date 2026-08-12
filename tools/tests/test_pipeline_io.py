@@ -18,10 +18,9 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import boilerplate
-import clean
+from tools import boilerplate, clean
 
 
 class TestCleanFile:
@@ -101,6 +100,41 @@ class TestCleanFile:
         assert dst.read_bytes() == b""
 
 
+class TestCleanJob:
+    """clean._job is the function the process pool actually calls.
+
+    Generated mutation testing reported nine mutants here as "no tests":
+    every test went through clean_file() directly, so the wrapper that
+    unpacks the pool's argument tuple was never executed. A wrong unpack
+    would fail on the first worker of a 60,830-file run.
+    """
+
+    def test_unpacks_the_job_tuple(self, tmp_path):
+        src = tmp_path / "in.txt"
+        dst = tmp_path / "out" / "in.txt"
+        src.write_bytes(b"don\x92t")
+
+        enc, changed, err = clean._job((str(src), str(dst), False))
+
+        assert err is None
+        assert enc == "cp1252"
+        assert changed is True
+        assert dst.read_text(encoding="utf-8") == "don’t"
+
+    def test_dry_run_flag_is_honoured(self, tmp_path):
+        src = tmp_path / "in.txt"
+        dst = tmp_path / "out" / "in.txt"
+        src.write_bytes(b"x")
+
+        clean._job((str(src), str(dst), True))
+        assert not dst.exists()
+
+    def test_error_is_returned_not_raised(self, tmp_path):
+        enc, changed, err = clean._job(
+            (str(tmp_path / "gone.txt"), str(tmp_path / "o.txt"), False))
+        assert err is not None
+
+
 class TestBoilerplateJob:
     def test_strips_and_writes(self, tmp_path):
         src = tmp_path / "1007.txt"
@@ -128,6 +162,27 @@ class TestBoilerplateJob:
             (str(tmp_path / "gone.txt"), str(tmp_path / "o.txt")))
         assert wrote == 0
         assert err is not None
+
+    def test_failed_write_is_not_counted_as_written(self, tmp_path):
+        """A book that could not be written must not be reported as one
+        that was.
+
+        Found by generated mutation testing: changing the failure return
+        from (0, ...) to (1, ...) survived, because no test checked the
+        count on the write-error path. The summary line at the end of a
+        60,830-file run is the only feedback there is, and inflating it
+        means silently losing books.
+        """
+        src = tmp_path / "1007.txt"
+        src.write_text("some text", encoding="utf-8")
+        blocker = tmp_path / "blocked"
+        blocker.write_text("a file, not a directory")
+
+        wrote, removed, err = boilerplate._job(
+            (str(src), str(blocker / "1007.txt")))
+
+        assert err is not None
+        assert wrote == 0
 
     def test_invalid_utf8_source_is_reported(self, tmp_path):
         """Stage 2 reads UTF-8 because stage 1 guarantees it. If someone

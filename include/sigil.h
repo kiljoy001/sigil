@@ -280,6 +280,20 @@ int sigil_simd_paths(int *avx2, int *sse42);
  * on this machine, which is not always the widest. */
 int sigil_simd_chosen(void);
 
+/*
+ * Force a kernel: 2 = AVX2, 1 = SSE4.2, 0 = scalar. Returns 0, or -1 if the
+ * CPU does not offer it. SIGIL_SIMD_PATH=scalar|sse|avx2 does the same from
+ * the environment.
+ *
+ * For tests and bug reports, not for production tuning -- the calibration
+ * measures, and a guess rarely beats a measurement. It exists because the
+ * dispatcher runs exactly one kernel per process, so without an override the
+ * others are unreachable and the differential tests cannot prove they agree.
+ * On non-x86 builds both are no-ops returning -1 and are harmless to call.
+ */
+int sigil_simd_force(int path);
+void sigil_simd_unforce(void);
+
 /* Hamming distance between two LSH codes, each SIGIL_LSH_WORDS words. */
 static inline uint32_t sigil_hamming(const uint64_t *a, const uint64_t *b)
 {

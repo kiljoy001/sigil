@@ -30,9 +30,9 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from boilerplate import strip_boilerplate, pick_best, book_id, _rank
+from tools.boilerplate import strip_boilerplate, pick_best, book_id, _rank
 
 BODY = "Real book text.\n\nSecond paragraph of the actual work.\n"
 
@@ -219,6 +219,43 @@ class TestPickBest:
         # edition, and stage 1 repairs encoding anyway.
         best = pick_best([Path("/g/1/1-8.txt"), Path("/g/1/old/1-0.txt")])
         assert best == Path("/g/1/1-8.txt")
+
+    def test_utf8_suffix_beats_plain_name(self):
+        """-0 must outrank a bare name, not merely tie with it.
+
+        Found by generated mutation testing: changing the -0 rank from 0
+        to 1 (a tie with plain ASCII) survived the whole suite, because
+        every case here compared -0 against -8 or against old/, never
+        against a sibling with no suffix at all. A tie would then be
+        broken by filename, which is arbitrary.
+        """
+        assert pick_best([Path("/g/1/1.txt"), Path("/g/1/1-0.txt")]) == \
+            Path("/g/1/1-0.txt")
+
+    def test_plain_name_beats_8bit(self):
+        """Bare (ASCII) is cleaner input than -8, so it must win."""
+        assert pick_best([Path("/g/1/1-8.txt"), Path("/g/1/1.txt")]) == \
+            Path("/g/1/1.txt")
+
+    def test_suffix_recognition_is_exact(self):
+        """The suffix test must actually match "-0", not any string.
+
+        A mutant that replaced the literal with nonsense survived: no
+        test distinguished "recognises -0" from "recognises nothing",
+        because with every candidate unrecognised the ranking still
+        happened to pick the same file by tie-break.
+        """
+        assert pick_best([Path("/g/1/1-8.txt"), Path("/g/1/1-0.txt")]) == \
+            Path("/g/1/1-0.txt")
+        assert pick_best([Path("/g/1/1-5.txt"), Path("/g/1/1-8.txt")]) == \
+            Path("/g/1/1-8.txt")
+
+    def test_full_encoding_order(self):
+        """-0 < bare < -8 < -5, checked as one ordering rather than as
+        isolated pairs."""
+        best = pick_best([Path("/g/1/1-5.txt"), Path("/g/1/1-8.txt"),
+                          Path("/g/1/1.txt"), Path("/g/1/1-0.txt")])
+        assert best == Path("/g/1/1-0.txt")
 
     def test_single_file_is_returned(self):
         assert pick_best([Path("/g/1/1.txt")]) == Path("/g/1/1.txt")

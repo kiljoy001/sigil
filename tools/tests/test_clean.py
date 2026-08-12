@@ -27,9 +27,9 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from clean import normalise_text, normalise_bytes, classify_encoding
+from tools.clean import normalise_text, normalise_bytes, classify_encoding
 
 
 # --- the specific bytes that caused the crash ---------------------------

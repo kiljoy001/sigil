@@ -372,20 +372,52 @@ test_filter_scans(void)
 	     "an absent category returns nothing");
 
 	/* The SIMD twins must agree with the scalar ones; differential.c
-	 * covers the similarity kernel but not these two. */
+	 * covers the similarity kernel but not these two.
+	 *
+	 * Sweep every path the CPU offers rather than testing whichever one
+	 * the calibration happened to pick. Without the force, exactly one
+	 * kernel runs per process and the others are unreachable -- which is
+	 * how scan_timerange_avx2 and scan_category_avx2 sat at 0% coverage
+	 * while appearing to be tested. An agreement test that cannot reach
+	 * the implementation it is comparing against proves nothing. */
 	{
+		static const struct { int p; const char *name; } paths[] = {
+			{ 0, "scalar" }, { 1, "sse4.2" }, { 2, "avx2" },
+		};
 		uint32_t o2[256];
-		size_t n2;
+		size_t n2, k;
 
-		n2 = sigil_scan_timerange_simd(&st, 10, 19, o2, 256);
-		n = sigil_scan_timerange_scalar(&st, 10, 19, out, 256);
-		ok(n == n2 && memcmp(out, o2, n * sizeof *out) == 0,
-		   "SIMD timerange matches scalar exactly");
+		for (k = 0; k < sizeof paths / sizeof paths[0]; k++) {
+			char msg[96];
 
-		n = sigil_scan_category_scalar(&st, 3, out, 256);
-		n2 = sigil_scan_category_simd(&st, 3, o2, 256);
-		ok(n == n2 && memcmp(out, o2, n * sizeof *out) == 0,
-		   "SIMD category matches scalar exactly");
+			if (sigil_simd_force(paths[k].p) != 0)
+				continue;      /* not offered here */
+
+			n2 = sigil_scan_timerange_simd(&st, 10, 19, o2, 256);
+			n = sigil_scan_timerange_scalar(&st, 10, 19, out, 256);
+			snprintf(msg, sizeof msg,
+			         "%s timerange matches scalar exactly",
+			         paths[k].name);
+			ok(n == n2 && memcmp(out, o2, n * sizeof *out) == 0,
+			   msg);
+
+			n = sigil_scan_category_scalar(&st, 3, out, 256);
+			n2 = sigil_scan_category_simd(&st, 3, o2, 256);
+			snprintf(msg, sizeof msg,
+			         "%s category matches scalar exactly",
+			         paths[k].name);
+			ok(n == n2 && memcmp(out, o2, n * sizeof *out) == 0,
+			   msg);
+
+			n2 = sigil_scan_similar_simd(&st, st.lsh, 8, o2, 256);
+			n = sigil_scan_similar_scalar(&st, st.lsh, 8, out, 256);
+			snprintf(msg, sizeof msg,
+			         "%s similar matches scalar exactly",
+			         paths[k].name);
+			ok(n == n2 && memcmp(out, o2, n * sizeof *out) == 0,
+			   msg);
+		}
+		sigil_simd_unforce();
 	}
 
 	sigil_store_free(&st);

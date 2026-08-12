@@ -166,6 +166,54 @@ def _job(args):
     return (1, removed, None)
 
 
+def find_files(src: Path, ext: str = ".txt") -> list:
+    """Every candidate file under src, in a reproducible order."""
+    return sorted(Path(r) / n
+                  for r, _d, fs in os.walk(src)
+                  for n in fs if n.endswith(ext))
+
+
+def select_books(all_files, keep_duplicates: bool = False) -> list:
+    """One file per book.
+
+    Split out of main() so the selection rule can be tested directly. It
+    decides what gets indexed and what is discarded -- on the sampled
+    subtree that is 331 files down to 110 -- and a wrong choice here means
+    indexing a superseded revision with no visible symptom.
+    """
+    if keep_duplicates:
+        return list(all_files)
+
+    by_book = {}
+    unnumbered = []
+    for f in all_files:
+        bid = book_id(f)
+        if bid is None:
+            # No numeric directory: not Gutenberg's layout. Keep it rather
+            # than silently dropping files this rule does not understand.
+            unnumbered.append(f)
+        else:
+            by_book.setdefault(bid, []).append(f)
+
+    # sorted() over the keys so the output order does not depend on dict
+    # insertion, which follows directory-walk order.
+    return [pick_best(by_book[k]) for k in sorted(by_book)] + unnumbered
+
+
+def plan_jobs(chosen, dst: Path) -> list:
+    """(src, dst) pairs, flattened to <book-id>.txt.
+
+    The source path encodes revision and encoding, and neither means
+    anything once one file has been picked.
+    """
+    jobs = []
+    for f in chosen:
+        bid = book_id(f)
+        name = f"{bid}.txt" if bid else f.name
+        jobs.append((str(f), str(dst / name)))
+    return jobs
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[2])
     ap.add_argument("src", type=Path, help="tree from tools/clean.py")
@@ -180,35 +228,10 @@ def main():
     if not a.src.is_dir():
         sys.exit(f"not a directory: {a.src}")
 
-    all_files = [Path(r) / n
-                 for r, _d, fs in os.walk(a.src)
-                 for n in fs if n.endswith(a.ext)]
-
-    if a.keep_duplicates:
-        chosen = all_files
-        skipped = 0
-    else:
-        by_book = {}
-        unnumbered = []
-        for f in all_files:
-            bid = book_id(f)
-            if bid is None:
-                # No numeric directory: not Gutenberg's layout. Keep it
-                # rather than silently dropping files this rule does not
-                # understand.
-                unnumbered.append(f)
-            else:
-                by_book.setdefault(bid, []).append(f)
-        chosen = [pick_best(v) for v in by_book.values()] + unnumbered
-        skipped = len(all_files) - len(chosen)
-
-    # Flatten to <book-id>.txt: the source path encodes revision and
-    # encoding, which no longer mean anything once one file has been picked.
-    jobs = []
-    for f in chosen:
-        bid = book_id(f)
-        name = f"{bid}.txt" if bid else f.name
-        jobs.append((str(f), str(a.dst / name)))
+    all_files = find_files(a.src, a.ext)
+    chosen = select_books(all_files, keep_duplicates=a.keep_duplicates)
+    jobs = plan_jobs(chosen, a.dst)
+    skipped = len(all_files) - len(chosen)
 
     print(f"{len(all_files)} files, {len(jobs)} books "
           f"({skipped} duplicates dropped), {a.j} workers", file=sys.stderr)

@@ -180,6 +180,47 @@ def _job(args):
     return clean_file(Path(src), Path(dst), dry_run)
 
 
+def plan_jobs(src: Path, dst: Path, ext: str = ".txt",
+              dry_run: bool = False) -> list:
+    """Which files need processing, and where each one goes.
+
+    Separate from main() so it can be tested: this is where the resume
+    logic lives, and a wrong skip silently leaves stale files in the
+    output tree -- the kind of bug that only shows up as a paragraph
+    count that does not match.
+    """
+    jobs = []
+    for root, _dirs, files in os.walk(src):
+        for name in sorted(files):     # sorted: reproducible job order
+            if not name.endswith(ext):
+                continue
+            s = Path(root) / name
+            d = dst / s.relative_to(src)
+            # Resumable: skip work already done in a previous run. Compare
+            # mtimes rather than existence, so a source edited after a run
+            # is picked up again.
+            if not dry_run and d.exists() and \
+               d.stat().st_mtime >= s.stat().st_mtime:
+                continue
+            jobs.append((str(s), str(d), dry_run))
+    return jobs
+
+
+def summarise(results) -> tuple:
+    """Fold per-file results into (counts, changed, errors)."""
+    counts = {}
+    changed = 0
+    errors = []
+    for enc, ch, err in results:
+        if enc:
+            counts[enc] = counts.get(enc, 0) + 1
+        if ch:
+            changed += 1
+        if err:
+            errors.append(err)
+    return counts, changed, errors
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[2])
     ap.add_argument("src", type=Path)
@@ -194,40 +235,21 @@ def main():
     if not a.src.is_dir():
         sys.exit(f"not a directory: {a.src}")
 
-    jobs = []
-    for root, _dirs, files in os.walk(a.src):
-        for name in files:
-            if not name.endswith(a.ext):
-                continue
-            s = Path(root) / name
-            d = a.dst / s.relative_to(a.src)
-            # Resumable: skip work already done in a previous run.
-            if not a.dry_run and d.exists() and \
-               d.stat().st_mtime >= s.stat().st_mtime:
-                continue
-            jobs.append((str(s), str(d), a.dry_run))
+    jobs = plan_jobs(a.src, a.dst, a.ext, a.dry_run)
 
     print(f"{len(jobs)} files to process, {a.j} workers", file=sys.stderr)
 
-    counts = {}
-    changed = 0
-    errors = []
-    done = 0
+    results = []
     with ProcessPoolExecutor(max_workers=a.j) as ex:
         futs = [ex.submit(_job, j) for j in jobs]
-        for f in as_completed(futs):
-            enc, ch, err = f.result()
-            if enc:
-                counts[enc] = counts.get(enc, 0) + 1
-            if ch:
-                changed += 1
-            if err:
-                errors.append(err)
-            done += 1
+        for done, f in enumerate(as_completed(futs), 1):
+            results.append(f.result())
             if done % 2000 == 0:
                 print(f"  {done}/{len(jobs)}", file=sys.stderr)
 
-    print(f"\nprocessed {done} files, {changed} changed", file=sys.stderr)
+    counts, changed, errors = summarise(results)
+    print(f"\nprocessed {len(results)} files, {changed} changed",
+          file=sys.stderr)
     for k in sorted(counts):
         print(f"  {k:10s} {counts[k]}", file=sys.stderr)
     if errors:

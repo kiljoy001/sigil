@@ -34,3 +34,9 @@ __pycache__/
 # Local experiment binaries (crash-rate harness targets)
 cmd/sigilfs-ubsan
 build/
+
+# Coverage and mutation-testing artifacts
+.coverage
+.mutmut-cache
+mutants/
+.pytest_cache/

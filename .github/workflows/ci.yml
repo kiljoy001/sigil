@@ -58,19 +58,21 @@ jobs:
     # code is fine when simple; CRAP flags the intersection, which is where
     # a bug survives review.
     #
-    # This gate is a ratchet, not an audit. SIGIL_CRAP_ALLOW is the count
-    # already over the line -- currently the two AVX2 filter kernels, which
-    # the -O0 coverage build never dispatches to because the runtime
-    # calibration picks another path there. New untested complexity fails
-    # the build; clearing the existing two means lowering the number.
+    # A ratchet, not an audit: SIGIL_CRAP_ALLOW is 0, so any function that
+    # crosses the threshold fails the build. Do not raise it to make a red
+    # build green -- test the function or split it.
     #
-    # It earned its place immediately: it caught src/utf8_repair.c at 0%
-    # line coverage and CRAP 600, because that code was tested only through
-    # Python/ctypes and the C build never executed it.
+    # It earned its place twice. It caught src/utf8_repair.c at 0% line
+    # coverage and CRAP 600, because that code was tested only through
+    # Python/ctypes and the C build never ran it. Then it caught the AVX2
+    # filter kernels at 0%, which turned out not to be a testing gap at all
+    # but an untestable design: the dispatcher runs exactly one kernel per
+    # process, so the others were unreachable. sigil_simd_force() fixed
+    # that, and coverage of scan_x86.c went 63% -> 88%.
     runs-on: ubuntu-24.04
     env:
       SIGIL_CRAP_MAX: 30
-      SIGIL_CRAP_ALLOW: 2
+      SIGIL_CRAP_ALLOW: 0
     steps:
       - uses: actions/checkout@v4
 
@@ -83,6 +85,15 @@ jobs:
 
       - name: CRAP score
         run: sh test/crap.sh
+
+      # Line coverage of our own C, excluding vendored BLAKE3 and the test
+      # files themselves -- both inflate the number without saying anything
+      # about whether sigil is tested. 90% is the floor, currently 91%.
+      - name: C line coverage >= 90%
+        run: |
+          gcovr --root . --object-directory build/cov \
+            --filter 'src/' --filter 'cmd/' --exclude 'third_party/' \
+            --fail-under-line 90 --txt
 
   python-pipeline:
     runs-on: ubuntu-24.04
@@ -115,3 +126,44 @@ jobs:
           python -m pytest tools/tests -v \
             --cov=clean --cov=boilerplate \
             --cov-report=term-missing --cov-fail-under=50
+
+  mutation:
+    # Mutation testing in two sets, because they answer different questions.
+    #
+    #   curated (test/mutate_py.sh) -- mistakes I chose: the ones a person
+    #   could plausibly make in this specific code. Precise and reviewable,
+    #   but bounded by what someone thought of.
+    #
+    #   generated (test/mutate_mutmut.sh) -- mutants nobody chose. Noisier
+    #   and slower, but it reaches the corners no one was thinking about.
+    #
+    # The bug that prompted all of this -- invalid UTF-8 reaching PCRE2 --
+    # was not on anyone's list, which is the argument for running both. On
+    # its first working run the generated set found five real gaps the
+    # curated set had missed, including a function the pool actually calls
+    # that had no test at all.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependencies
+        run: pip install pytest hypothesis mutmut
+
+      # Curated set: every mutant must die. A survivor here means a
+      # mistake we specifically anticipated is no longer detected.
+      - name: Curated mutants (must be 0 survivors)
+        run: PY=python sh test/mutate_py.sh
+
+      # Generated set: a budget, not zero. ~95 survivors are in main() --
+      # print intervals and argparse help text -- plus mutations that are
+      # genuinely equivalent (Python codec names are case-insensitive, so
+      # "ascii" -> "ASCII" is undetectable by construction). Lower the
+      # number as survivors get fixed; raising it needs a reason.
+      - name: Generated mutants (mutmut)
+        env:
+          MUTMUT_ALLOW: 135
+        run: PY=python sh test/mutate_mutmut.sh

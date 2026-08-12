@@ -45,6 +45,34 @@ int sigil_have_simd(void)
 	return 1; /* baseline on aarch64 */
 }
 
+/* Path selection is an x86 concern: this build has exactly one kernel, so
+ * there is nothing to calibrate and nothing to force. Defined here anyway
+ * because sigil.h declares them for every platform, and a header that
+ * promises a symbol no object provides is a link error waiting for the
+ * first person to build on this architecture. */
+int sigil_simd_paths(int *avx2, int *sse42)
+{
+	if (avx2 != NULL)
+		*avx2 = 0;
+	if (sse42 != NULL)
+		*sse42 = 0;
+	return 0;
+}
+
+int sigil_simd_chosen(void)
+{
+	return 0;
+}
+
+int sigil_simd_force(int path)
+{
+	return path == 0 ? 0 : -1;
+}
+
+void sigil_simd_unforce(void)
+{
+}
+
 size_t sigil_scan_similar_simd(const sigil_store_t *st, const uint64_t *query,
                                uint32_t max_distance,
                                uint32_t *out, size_t max_out)

@@ -362,11 +362,68 @@ calibrate(void)
 	chosen_path = best;
 }
 
+/*
+ * Force a kernel, for tests and for bug reports.
+ *
+ * The calibration picks one path and the others are then never executed, so
+ * coverage of a kernel depends on which one happened to win the race. Under
+ * an -O0 coverage build scalar wins, which left the AVX2 filter kernels at
+ * 0% -- reported as untested code when the real problem was that no test
+ * could reach them. Silently untestable code is worse than uncovered code:
+ * the differential tests can only prove the kernels agree if they can run
+ * each one.
+ *
+ * Returns 0 on success, -1 if this CPU does not offer the requested path.
+ * SIGIL_SIMD_PATH=scalar|sse|avx2 does the same from the environment, which
+ * is how the coverage build sweeps all three.
+ */
+int sigil_simd_force(int want)
+{
+	switch (want) {
+	case PathAvx2:
+		if (!have_avx2())
+			return -1;
+		break;
+	case PathSse:
+		if (!have_sse42())
+			return -1;
+		break;
+	case PathScalar:
+		break;
+	default:
+		return -1;
+	}
+	chosen_path = want;
+	return 0;
+}
+
+/* Undo a force: the next call re-runs (or reuses) the calibration. */
+void sigil_simd_unforce(void)
+{
+	chosen_path = -1;
+}
+
 static int
 path(void)
 {
-	if (chosen_path < 0)
+	if (chosen_path < 0) {
+		const char *env = getenv("SIGIL_SIMD_PATH");
+
+		/* An explicit request wins over the measurement, and a
+		 * request this CPU cannot satisfy falls through to the
+		 * calibration rather than pretending: forcing AVX2 on a
+		 * machine without it would be a SIGILL, which is exactly
+		 * the crash the runtime dispatch exists to prevent. */
+		if (env != NULL) {
+			if (strcmp(env, "scalar") == 0)
+				return chosen_path = PathScalar;
+			if (strcmp(env, "sse") == 0 && have_sse42())
+				return chosen_path = PathSse;
+			if (strcmp(env, "avx2") == 0 && have_avx2())
+				return chosen_path = PathAvx2;
+		}
 		calibrate();
+	}
 	return chosen_path;
 }
 
