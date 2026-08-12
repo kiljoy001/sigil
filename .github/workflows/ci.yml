@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Scott J Guyton
+#
+# CI for sigil.
+#
+# The corpus-cleanup work that this file was added for came out of a bug that
+# took a session to find because results were not reproducible: a crash that
+# appeared 8 times in 12 on one machine and looked like a race. The point of
+# running these on every push is that a claim like "the tests pass" means the
+# same thing tomorrow as it did today.
+#
+# What runs here and what does not:
+#
+#   * The C suite builds WITHOUT OpenVINO. GitHub runners have no Intel GPU
+#     and no OpenVINO install, and libsigil falls back to the byte-shingle
+#     embedder, which is exactly what the unit/property/OOM tests exercise.
+#     The OpenVINO paths are covered by the local crash-rate harness
+#     (test/crashrate.sh), which needs real hardware and stays manual.
+#
+#   * The Python pipeline tests run everywhere -- pure text processing over
+#     fixtures committed to the repo, no corpus and no network.
+
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  c-suite:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build libsigil (no OpenVINO, no llama)
+        run: make libsigil.a
+
+      # differential/unit/bridge/oom. Not prop: theft is vendored in a
+      # sibling libtab checkout that does not exist on a runner.
+      - name: Unit, differential, bridge, allocation-failure tests
+        run: make check
+
+      - name: Sanitizer build and rerun
+        run: |
+          make clean
+          make libsigil.a CFLAGS="-O1 -g -std=c11 -fsanitize=address,undefined \
+            -fno-omit-frame-pointer -fno-sanitize-recover=all"
+          make check CFLAGS="-O1 -g -std=c11 -fsanitize=address,undefined \
+            -fno-omit-frame-pointer -fno-sanitize-recover=all"
+
+  python-pipeline:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependencies
+        run: pip install pytest hypothesis
+
+      # Property tests included: encoding repair is exactly the kind of code
+      # where the case you did not think of is the one in the corpus.
+      - name: Pipeline tests
+        run: python -m pytest tools/tests -v

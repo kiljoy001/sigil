@@ -1419,6 +1419,81 @@ a formula's precedents are explicit in the syntax.
 
 ---
 
+## The indexing crash was never a race
+
+Indexing Gutenberg segfaulted intermittently for weeks: same corpus, same
+binary, sometimes 64 seconds in, sometimes 450, sometimes not at all. Every
+signature said race -- and that intuition, while reasonable, cost most of the
+investigation, because the actual source of nondeterminism was ASLR.
+
+**Root cause**: Project Gutenberg files carry Windows-1252 bytes (0x92 curly
+apostrophe and friends) inside files served as UTF-8. Those bytes reached
+openvino_tokenizers' `SpecialTokensSplit`, which runs PCRE2 compiled in UTF-8
+mode without `PCRE2_MATCH_INVALID_UTF`. PCRE2 documents matching invalid UTF
+as undefined behaviour; concretely, the sljit-JIT'd matcher decodes a garbage
+codepoint and indexes a character-class table with it:
+
+    => movzwq (%rcx,%rax,2),%rcx        ; table lookup, garbage index
+       movabs $0x7ffff5ba6fa1,%r9
+       movzbq (%rcx,%r9,1),%rcx         ; wild read -- SIGSEGV here
+
+Whether that wild read faults or silently returns garbage depends on what
+happens to be mapped at the target address -- i.e. on mmap layout. Hence:
+
+| condition | crash rate |
+|---|---|
+| ASLR on, GPU.1 | 8/12 |
+| ASLR on, CPU | 12/12 (each at 80 s) |
+| ASLR off | 8/8 -- fully deterministic |
+| ASLR off, invalid UTF-8 stripped from input | 0/4 |
+| ASLR off, fix applied | 0/8 |
+| ASLR on, fix applied | 0/24 |
+
+The "passing" 40% of runs were not passing. They were reading unmapped-
+adjacent memory into the tokenization and continuing.
+
+**The fix** is at the embedder boundary (`src/embed_openvino.cpp`,
+`to_valid_utf8`): bytes that are not valid UTF-8 are transcoded as
+CP1252/Latin-1, so 0x92 becomes a real U+2019 the embedding can use.
+Identity is untouched -- BLAKE3 still hashes the original bytes.
+
+### What the investigation disproved along the way
+
+Each of these was tested directly and eliminated: libthread's scheduler
+(no-libthread build crashed identically), the GPU driver and dual-GPU setup
+(CPU device crashed too), the pip-wheel OpenVINO build (native archive
+crashed at the same rate), plan9port's runtime (a pure-POSIX gcc driver
+crashed at the same rate), thread-count races (taskset -c 0 changed
+nothing), and stack sizes (2/8/32 MB identical).
+
+### Methodology lessons, learned the expensive way
+
+1. **A nondeterministic bug makes single trials worthless.** Half a day of
+   bisection produced confident conclusions -- "it's the UTF-8", "no, retest
+   says it isn't" -- that were coin flips. With a ~60% crash rate, only
+   rates over N >= 12 trials distinguish signal from luck
+   (`test/crashrate.sh`). The one exception: a *crash* on the first trial is
+   real evidence; a *pass* is not.
+2. **`setarch -R` belongs early in any intermittent-crash checklist.** One
+   ASLR-off run converted a heisenbug into a deterministic one and ended the
+   guessing within minutes. "Intermittent" does not always mean "race" --
+   layout randomization is the other big source, and it is the one you can
+   switch off.
+3. **Valgrind named the culprit on day one** -- 997x `Invalid read of size
+   16` in `SpecialTokensSplit::evaluate` -- and was dismissed because there
+   was "no crash under valgrind". Valgrind's allocator absorbs over-reads in
+   padding; absence of a crash under valgrind is not absence of the bug it
+   is reporting.
+4. **rip in an anonymous rwxp mapping means JIT code**, and regex engines
+   JIT too. The frame `0x989681` that looked like a corrupted return address
+   was sljit's non-standard frame layout confusing the unwinder.
+
+Upstream: openvino_tokenizers should pass `PCRE2_MATCH_INVALID_UTF` (or
+validate input). Observed in the 2026.3.0 release (wheel and archive alike);
+not yet reported upstream.
+
+---
+
 ## Machines
 
 | name | CPU | SIMD | accelerator |

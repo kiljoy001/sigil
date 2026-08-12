@@ -37,6 +37,7 @@
 
 #include <openvino/openvino.hpp>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -60,8 +61,32 @@ struct Impl {
 	// The tokenizer is a separate OpenVINO model produced by the same
 	// export. Keeping it in-process avoids a Python dependency in the
 	// server, which is the whole point of doing this in C++.
+	/* Hold the tokenizer's CompiledModel, not just its InferRequest.
+	 *
+	 * This was a local in the constructor, so it was destroyed as soon as
+	 * the embedder was built while the InferRequest kept being used. The
+	 * embedding model above keeps its CompiledModel; the tokenizer did
+	 * not, and the asymmetry was the whole bug -- reads landing a
+	 * constant 1,672 bytes below the mapping of openvino_tokenizer.bin,
+	 * intermittently, once enough allocation had happened for the freed
+	 * region to be unmapped. */
+	ov::CompiledModel tok_model;
 	ov::InferRequest tok;
 	bool have_tok = false;
+
+	/* Tensors handed to an InferRequest must outlive every call that may
+	 * read them.
+	 *
+	 * set_input_tensor() and set_tensor() store a reference, not a copy.
+	 * These were stack locals, destroyed at the end of the call while the
+	 * request kept pointing at their buffers -- which is why the fault
+	 * landed a constant 1,672 bytes below a freed mapping, and why it
+	 * needed enough allocation churn to become fatal. The documented
+	 * Python path never hits this because it passes data by value.
+	 *
+	 * Holding them on the embedder means they are also reused rather than
+	 * reallocated per batch. */
+	ov::Tensor t_in, t_ids, t_msk, t_tt;
 	/* Whether the model declares token_type_ids, decided once.
 	 *
 	 * This used to be a scan of model.inputs() inside the per-chunk loop,
@@ -71,6 +96,114 @@ struct Impl {
 	 * without it -- more than the model inference itself. */
 	bool need_token_type = false;
 };
+
+/*
+ * Coerce arbitrary bytes to valid UTF-8 before they reach the tokenizer.
+ *
+ * This is not cosmetic. openvino_tokenizers' SpecialTokensSplit hands the
+ * text to PCRE2 compiled in UTF-8 mode without PCRE2_MATCH_INVALID_UTF,
+ * and PCRE2 documents matching invalid UTF as undefined behaviour. In
+ * practice the sljit-compiled matcher decodes a garbage codepoint from the
+ * stray byte and indexes a character-class table with it: a wild read that
+ * SIGSEGVs when the address happens to fall on an unmapped page and reads
+ * silently otherwise. That address depends on mmap layout, so identical
+ * input crashed ~60% of runs with ASLR on and 100% with it off -- weeks of
+ * apparent "race" that was never a race (docs/FINDINGS.md).
+ *
+ * Project Gutenberg texts are full of the trigger: Windows-1252 bytes
+ * (0x92 curly apostrophe and friends) inside files labelled UTF-8. So the
+ * salvage is CP1252-aware rather than lossy: a byte that is not part of a
+ * valid UTF-8 sequence is transcoded as CP1252/Latin-1, which turns 0x92
+ * into a real U+2019 the embedding can use, instead of U+FFFD noise.
+ * Hashing is unaffected -- sigil identity stays BLAKE3 over the original
+ * bytes; only the embedder sees the repaired copy.
+ */
+static const uint16_t cp1252_c1[32] = {
+	/* 0x80 */ 0x20AC, 0xFFFD, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+	/* 0x88 */ 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0xFFFD, 0x017D, 0xFFFD,
+	/* 0x90 */ 0xFFFD, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+	/* 0x98 */ 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0xFFFD, 0x017E, 0x0178,
+};
+
+static void append_utf8(std::string &o, uint32_t cp)
+{
+	if (cp < 0x80) {
+		o += static_cast<char>(cp);
+	} else if (cp < 0x800) {
+		o += static_cast<char>(0xC0 | (cp >> 6));
+		o += static_cast<char>(0x80 | (cp & 0x3F));
+	} else {
+		o += static_cast<char>(0xE0 | (cp >> 12));
+		o += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+		o += static_cast<char>(0x80 | (cp & 0x3F));
+	}
+}
+
+/* Length of the valid UTF-8 sequence at p, or 0 if invalid. Rejects
+ * overlong forms, surrogates and > U+10FFFF -- those are exactly as
+ * undefined for PCRE2 as a lone continuation byte. */
+static size_t utf8_seq(const unsigned char *p, size_t left)
+{
+	if (p[0] < 0x80)
+		return 1;
+	if (p[0] < 0xC2)                     /* continuation or overlong */
+		return 0;
+	if (p[0] < 0xE0)
+		return (left >= 2 && (p[1] & 0xC0) == 0x80) ? 2 : 0;
+	if (p[0] < 0xF0) {
+		if (left < 3 || (p[1] & 0xC0) != 0x80 || (p[2] & 0xC0) != 0x80)
+			return 0;
+		if (p[0] == 0xE0 && p[1] < 0xA0)              /* overlong */
+			return 0;
+		if (p[0] == 0xED && p[1] >= 0xA0)             /* surrogate */
+			return 0;
+		return 3;
+	}
+	if (p[0] < 0xF5) {
+		if (left < 4 || (p[1] & 0xC0) != 0x80 ||
+		    (p[2] & 0xC0) != 0x80 || (p[3] & 0xC0) != 0x80)
+			return 0;
+		if (p[0] == 0xF0 && p[1] < 0x90)              /* overlong */
+			return 0;
+		if (p[0] == 0xF4 && p[1] >= 0x90)             /* > U+10FFFF */
+			return 0;
+		return 4;
+	}
+	return 0;
+}
+
+static std::string to_valid_utf8(const char *text, size_t len)
+{
+	const unsigned char *p = reinterpret_cast<const unsigned char *>(text);
+	size_t i = 0;
+
+	/* Fast path: scan first, copy only if something is wrong. */
+	while (i < len) {
+		size_t n = utf8_seq(p + i, len - i);
+		if (n == 0)
+			break;
+		i += n;
+	}
+	if (i == len)
+		return std::string(text, len);
+
+	std::string o;
+	o.reserve(len + 8);
+	o.append(text, i);
+	while (i < len) {
+		size_t n = utf8_seq(p + i, len - i);
+		if (n != 0) {
+			o.append(text + i, n);
+			i += n;
+			continue;
+		}
+		unsigned char b = p[i++];
+		append_utf8(o, b < 0x80 ? 0xFFFDu :          /* unreachable */
+		               b < 0xA0 ? cp1252_c1[b - 0x80] :
+		               static_cast<uint32_t>(b));    /* Latin-1 */
+	}
+	return o;
+}
 
 int embed_one(Impl *im, const char *text, size_t len, float *out);
 
@@ -96,15 +229,22 @@ int embed_one(Impl *im, const char *text, size_t len, float *out)
 
 	// Tokenize. The exported tokenizer takes a string tensor and returns
 	// input_ids and attention_mask.
-	std::string s(text, len);
-	ov::Tensor in(ov::element::string, ov::Shape{1});
-	in.data<std::string>()[0] = s;
-	im->tok.set_input_tensor(in);
+	im->t_in = ov::Tensor(ov::element::string, ov::Shape{1});
+	im->t_in.data<std::string>()[0] = to_valid_utf8(text, len);
+	im->tok.set_input_tensor(im->t_in);
 	im->tok.infer();
 
-	ov::Tensor ids  = im->tok.get_tensor("input_ids");
-	ov::Tensor mask = im->tok.get_tensor("attention_mask");
-	size_t ntok = ids.get_shape()[1];
+	/* Copy out; see the note in ov_embed_batch. */
+	std::vector<int64_t> id_buf, mk_buf;
+	{
+		ov::Tensor ti = im->tok.get_tensor("input_ids");
+		ov::Tensor tm = im->tok.get_tensor("attention_mask");
+		size_t tn = ti.get_shape()[1];
+
+		id_buf.assign(ti.data<int64_t>(), ti.data<int64_t>() + tn);
+		mk_buf.assign(tm.data<int64_t>(), tm.data<int64_t>() + tn);
+	}
+	size_t ntok = id_buf.size();
 
 	// Chunk over the position limit, pooling the pieces. Averaging float
 	// vectors then renormalizing is the correct combiner: pooling packed
@@ -114,16 +254,18 @@ int embed_one(Impl *im, const char *text, size_t len, float *out)
 		return -1;
 
 	std::vector<float> acc(im->dim, 0.0f);
-	const int64_t *idp = ids.data<int64_t>();
-	const int64_t *mkp = mask.data<int64_t>();
+	const int64_t *idp = id_buf.data();
+	const int64_t *mkp = mk_buf.data();
 
 	for (size_t c = 0; c < nchunk; c++) {
 		size_t lo = c * Maxtokens;
 		size_t hi = std::min(lo + Maxtokens, ntok);
 		size_t n = hi - lo;
 
-		ov::Tensor cid(ov::element::i64, ov::Shape{1, n});
-		ov::Tensor cmk(ov::element::i64, ov::Shape{1, n});
+		ov::Tensor &cid = im->t_ids, &cmk = im->t_msk;
+
+		cid = ov::Tensor(ov::element::i64, ov::Shape{1, n});
+		cmk = ov::Tensor(ov::element::i64, ov::Shape{1, n});
 		std::memcpy(cid.data<int64_t>(), idp + lo, n * sizeof(int64_t));
 		std::memcpy(cmk.data<int64_t>(), mkp + lo, n * sizeof(int64_t));
 
@@ -132,9 +274,11 @@ int embed_one(Impl *im, const char *text, size_t len, float *out)
 		// Some exports also want token_type_ids; feed zeros when the
 		// model declares it rather than failing the whole embed.
 		if (im->need_token_type) {
-			ov::Tensor tt(ov::element::i64, ov::Shape{1, n});
-			std::memset(tt.data<int64_t>(), 0, n * sizeof(int64_t));
-			im->req.set_tensor("token_type_ids", tt);
+			im->t_tt = ov::Tensor(ov::element::i64,
+			                      ov::Shape{1, n});
+			std::memset(im->t_tt.data<int64_t>(), 0,
+			            n * sizeof(int64_t));
+			im->req.set_tensor("token_type_ids", im->t_tt);
 		}
 		im->req.infer();
 
@@ -202,20 +346,41 @@ int ov_embed_batch(sigil_embedder_t *self, const char **texts,
 		 * embed_one(), which chunks after tokenizing -- that mismatch
 		 * showed up as 23 of 300 paragraphs disagreeing with the
 		 * per-text path instead of 0. */
-		ov::Tensor win(ov::element::string, ov::Shape{n});
+		im->t_in = ov::Tensor(ov::element::string, ov::Shape{n});
 		for (size_t i = 0; i < n; i++)
-			win.data<std::string>()[i] = std::string(texts[i], lens[i]);
-		im->tok.set_input_tensor(win);
+			im->t_in.data<std::string>()[i] =
+				to_valid_utf8(texts[i], lens[i]);
+		im->tok.set_input_tensor(im->t_in);
 		im->tok.infer();
 
-		ov::Tensor wids = im->tok.get_tensor("input_ids");
-		ov::Tensor wmsk = im->tok.get_tensor("attention_mask");
-		size_t WT = wids.get_shape()[1];
+		/* Copy the tokenizer's output out immediately.
+		 *
+		 * get_tensor() returns a view into the request's own buffer,
+		 * which the next inference on that request -- or on another
+		 * sharing the runtime's allocator -- may reuse or reallocate.
+		 * The documented Python path copies into numpy at exactly this
+		 * point; holding the view instead is the difference between
+		 * the two, and the Python path survives the corpus that kills
+		 * this one. */
+		std::vector<int64_t> wid_buf, wmsk_buf;
+		size_t WT;
+		{
+			ov::Tensor wi = im->tok.get_tensor("input_ids");
+			ov::Tensor wm = im->tok.get_tensor("attention_mask");
+
+			WT = wi.get_shape()[1];
+			wid_buf.assign(wi.data<int64_t>(),
+			               wi.data<int64_t>() + n * WT);
+			wmsk_buf.assign(wm.data<int64_t>(),
+			                wm.data<int64_t>() + n * WT);
+		}
+		const int64_t *wids_p = wid_buf.data();
+		const int64_t *wmsk_p = wmsk_buf.data();
 
 		/* One row per chunk; owner[r] is the text row r belongs to. */
 		std::vector<size_t> owner, start, count;
 		for (size_t i = 0; i < n; i++) {
-			const int64_t *m = wmsk.data<int64_t>() + i * WT;
+			const int64_t *m = wmsk_p + i * WT;
 			size_t real = 0;
 			while (real < WT && m[real] != 0)
 				real++;
@@ -237,13 +402,15 @@ int ov_embed_batch(sigil_embedder_t *self, const char **texts,
 			if (count[r] > Tuse)
 				Tuse = count[r];
 
-		ov::Tensor cid(ov::element::i64, ov::Shape{R, Tuse});
-		ov::Tensor cmk(ov::element::i64, ov::Shape{R, Tuse});
+		ov::Tensor &cid = im->t_ids, &cmk = im->t_msk;
+
+		cid = ov::Tensor(ov::element::i64, ov::Shape{R, Tuse});
+		cmk = ov::Tensor(ov::element::i64, ov::Shape{R, Tuse});
 		std::memset(cid.data<int64_t>(), 0, R * Tuse * sizeof(int64_t));
 		std::memset(cmk.data<int64_t>(), 0, R * Tuse * sizeof(int64_t));
 		for (size_t r = 0; r < R; r++) {
 			std::memcpy(cid.data<int64_t>() + r * Tuse,
-			            wids.data<int64_t>() + start[r],
+			            wids_p + start[r],
 			            count[r] * sizeof(int64_t));
 			for (size_t t = 0; t < count[r]; t++)
 				cmk.data<int64_t>()[r * Tuse + t] = 1;
@@ -251,10 +418,11 @@ int ov_embed_batch(sigil_embedder_t *self, const char **texts,
 		im->req.set_tensor("input_ids", cid);
 		im->req.set_tensor("attention_mask", cmk);
 		if (im->need_token_type) {
-			ov::Tensor tt(ov::element::i64, ov::Shape{R, Tuse});
-			std::memset(tt.data<int64_t>(), 0,
+			im->t_tt = ov::Tensor(ov::element::i64,
+			                      ov::Shape{R, Tuse});
+			std::memset(im->t_tt.data<int64_t>(), 0,
 			            R * Tuse * sizeof(int64_t));
-			im->req.set_tensor("token_type_ids", tt);
+			im->req.set_tensor("token_type_ids", im->t_tt);
 		}
 		im->req.infer();
 
@@ -361,17 +529,35 @@ sigil_embedder_openvino(const char *model_dir, const char *device)
 			}
 		}
 
+		// SIGIL_OV_THREADS pins the TBB inference pool. Diagnostic
+		// knob for the indexing crash: the crash is a race (8/12 on
+		// identical input), and a pool of one worker cannot race with
+		// itself. Applied to CPU compiles only -- the GPU plugin
+		// rejects the property.
+		ov::AnyMap cpu_props;
+		{
+			const char *nt = std::getenv("SIGIL_OV_THREADS");
+			if (nt != nullptr && nt[0] != '\0')
+				cpu_props.emplace(
+					ov::inference_num_threads.name(),
+					std::atoi(nt));
+		}
+
 		std::string dir(model_dir);
-		im->model = core.compile_model(dir + "/openvino_model.xml",
-		                               im->device);
+		im->model = (im->device.find("CPU") != std::string::npos)
+			? core.compile_model(dir + "/openvino_model.xml",
+			                     im->device, cpu_props)
+			: core.compile_model(dir + "/openvino_model.xml",
+			                     im->device);
 		im->req = im->model.create_infer_request();
 
 		// Tokenizer is optional only in the sense that its absence is
 		// fatal here rather than silently producing garbage.
 		try {
-			auto tk = core.compile_model(
-				dir + "/openvino_tokenizer.xml", "CPU");
-			im->tok = tk.create_infer_request();
+			im->tok_model = core.compile_model(
+				dir + "/openvino_tokenizer.xml", "CPU",
+				cpu_props);
+			im->tok = im->tok_model.create_infer_request();
 			im->have_tok = true;
 		} catch (const std::exception &e) {
 			// The tokenizer is the usual failure and the message

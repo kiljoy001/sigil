@@ -30,3 +30,7 @@ cmd/*.o
 cmd/*.a
 cmd/sigilfs
 __pycache__/
+
+# Local experiment binaries (crash-rate harness targets)
+cmd/sigilfs-ubsan
+build/

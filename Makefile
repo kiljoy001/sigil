@@ -25,16 +25,31 @@ endif
 #   pip install openvino "optimum-intel[openvino]"
 #   optimum-cli export openvino -m sentence-transformers/all-MiniLM-L6-v2 \
 #       --task feature-extraction /models/minilm
-OPENVINO_DIR ?= /opt/intel/openvino
+# Prefer the native C++ runtime archive. The pip wheel worked, but linking a
+# server against a library that lives inside a Python venv means the venv's
+# lifetime governs the binary's (one deleted scratch venv already produced an
+# unrunnable sigilfs), its TBB loads plugins with RTLD_DEEPBIND (which blocks
+# ASan outright), and it ships no unversioned .so. The archive install has
+# none of those problems and no Python anywhere in the chain.
+OPENVINO_DIR ?= $(firstword $(wildcard /mnt/bulk/openvino-native/current) \
+                            /opt/intel/openvino)
 
-# Two layouts. The toolkit installs under runtime/; the pip wheel puts headers
-# at include/ and ships libopenvino.so.<ver> with no unversioned symlink, so
-# -lopenvino does not resolve and the versioned file is linked directly.
+# Two layouts. The toolkit/archive installs under runtime/; the pip wheel puts
+# headers at include/ and ships libopenvino.so.<ver> with no unversioned
+# symlink, so -lopenvino does not resolve and the versioned file is linked
+# directly.
+#
+# --disable-new-dtags makes the rpath DT_RPATH rather than DT_RUNPATH, so it
+# beats LD_LIBRARY_PATH: this machine's oneAPI environment exports a 2023-era
+# libtbb.so.12 there, and OpenVINO 2026 picking that up at run time is exactly
+# the kind of silent substitution this build must not allow.
 ifneq ($(wildcard $(OPENVINO_DIR)/runtime/include/openvino/openvino.hpp),)
   HAVE_OPENVINO := 1
   OV_INC = -I$(OPENVINO_DIR)/runtime/include
   OV_LIB = -L$(OPENVINO_DIR)/runtime/lib/intel64 -lopenvino \
-           -Wl,-rpath,$(OPENVINO_DIR)/runtime/lib/intel64
+           -Wl,--disable-new-dtags \
+           -Wl,-rpath,$(OPENVINO_DIR)/runtime/lib/intel64 \
+           -Wl,-rpath,$(OPENVINO_DIR)/runtime/3rdparty/tbb/lib
 else ifneq ($(wildcard $(OPENVINO_DIR)/include/openvino/openvino.hpp),)
   HAVE_OPENVINO := 1
   OV_INC = -I$(OPENVINO_DIR)/include

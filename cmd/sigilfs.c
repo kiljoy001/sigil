@@ -100,22 +100,24 @@ tcploop(char *addr)
 		/* Serve inline, on the main thread.
 		 *
 		 * This was proccreate(), which gives each connection its own
-		 * libthread proc. OpenVINO does not survive that: indexing
-		 * segfaulted inside the GPU plugin with a return address
-		 * pointing into the libthread stack region, no symbols, and an
-		 * empty log. Raising the stack from 32 KB to 8 MB moved the
-		 * crash later but did not remove it, and the identical batch
-		 * through the identical embed_batch() runs clean outside
-		 * libthread at 1466 paragraphs/s -- so the batching is right
-		 * and the threading context is not. OpenVINO spawns its own
-		 * TBB pool, which does not expect the stack switching
-		 * libthread does underneath it.
+		 * libthread proc. It was demoted to inline serving while
+		 * chasing the indexing segfault, on the theory that OpenVINO's
+		 * TBB pool could not survive libthread's stack switching.
 		 *
-		 * The cost is one client at a time. That is what sigilfs
-		 * actually does -- a mount, an index, a query -- and a
-		 * correct serial server beats a concurrent one that crashes.
-		 * Restoring concurrency means moving the embedder out of
-		 * process, not moving the server back onto libthread procs. */
+		 * That theory was wrong. The crash was never a threading
+		 * problem: it was invalid UTF-8 (Windows-1252 bytes in
+		 * Gutenberg files) reaching PCRE2 inside openvino_tokenizers,
+		 * which is documented undefined behaviour and reads wild --
+		 * fatally or silently depending on ASLR, which is what made
+		 * it look intermittent. Fixed at the embedder boundary in
+		 * src/embed_openvino.cpp (to_valid_utf8); measured 8/12
+		 * crashes before, 0/24 after, on identical input. Full record
+		 * in docs/FINDINGS.md.
+		 *
+		 * Serving stays inline anyway: one client at a time is what
+		 * sigilfs actually does -- a mount, an index, a query -- and
+		 * nothing has demonstrated a need for more. If concurrency is
+		 * ever wanted, proccreate() is no longer suspect. */
 		serveconn((void*)(uintptr)fd);
 	}
 	USED(actl);

@@ -31,11 +31,21 @@ ifneq ($(wildcard $(LLAMA_DIR)/build/bin/libllama.so),)
                -Wl,-rpath,$(LLAMA_DIR)/build/bin -lstdc++ -lm
 endif
 
-# Same for OpenVINO. The pip wheel ships C++ headers and a versioned .so with
-# no unversioned symlink, so -lopenvino does not resolve against it -- link the
-# file directly. Point OPENVINO_LIB at libopenvino.so.<ver>.
+# Same for OpenVINO. Default to the native C++ runtime archive (see the
+# top-level Makefile for why the pip wheel is no longer the default);
+# OPENVINO_LIB=<path to libopenvino.so.<ver>> still overrides for a wheel.
+# DT_RPATH (--disable-new-dtags) so the oneAPI environment's stale
+# LD_LIBRARY_PATH TBB cannot substitute itself at run time.
+OPENVINO_NATIVE ?= /mnt/bulk/openvino-native/current
 ifneq ($(OPENVINO_LIB),)
-  OV_LIBS = $(OPENVINO_LIB) -Wl,-rpath,$(dir $(OPENVINO_LIB)) -lstdc++ -lm
+  OV_LIBS = $(OPENVINO_LIB) -Wl,--disable-new-dtags \
+            -Wl,-rpath,$(dir $(OPENVINO_LIB)) -lstdc++ -lm
+else ifneq ($(wildcard $(OPENVINO_NATIVE)/runtime/lib/intel64/libopenvino.so),)
+  OV_LIBS = -L$(OPENVINO_NATIVE)/runtime/lib/intel64 -lopenvino \
+            -Wl,--disable-new-dtags \
+            -Wl,-rpath,$(OPENVINO_NATIVE)/runtime/lib/intel64 \
+            -Wl,-rpath,$(OPENVINO_NATIVE)/runtime/3rdparty/tbb/lib \
+            -lstdc++ -lm
 endif
 
 # Exclude stub_9pclient.c: it is a shim for callers that link libauth but not
@@ -54,11 +64,18 @@ sigilfs: $(OBJ) libtab.a $(SIGIL_ROOT)/libsigil.a
 
 # The TCP server, built without libthread.
 #
-# OpenVINO spawns a TBB pool of twenty-plus pthreads, and inside a libthread
-# process -- whose scheduler switches stacks underneath them -- indexing
-# segfaults intermittently. The same embedder over the same corpus runs clean
-# outside libthread. Only tpost.c in lib9p needs libthread, and that is the
-# -s/-m service-posting path; srv() over a socket does not.
+# History: this target was created on the theory that libthread's stack
+# switching underneath OpenVINO's TBB pool caused the indexing segfault.
+# That was wrong -- the crash was invalid UTF-8 reaching PCRE2 inside
+# openvino_tokenizers (undefined behaviour, ASLR-dependent symptom), fixed
+# in src/embed_openvino.cpp. Measured: the no-libthread build crashed at
+# the same rate as the libthread one until the UTF-8 fix, and both are
+# clean after it. See docs/FINDINGS.md.
+#
+# The target stays because it is still occasionally useful to run the
+# server without libthread (plain gdb/perf sessions are simpler), not
+# because libthread is unsafe. Only tpost.c in lib9p needs libthread, and
+# that is the -s/-m service-posting path; srv() over a socket does not.
 #
 # -l9pclient is still here because libtab references nsmount for its
 # tab_open_dial path, which sigil never calls.
