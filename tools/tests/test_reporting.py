@@ -89,11 +89,34 @@ class TestCleanReport:
         assert r.count("/f") == 20
         assert "1 more" in r
 
-    def test_lines_are_newline_separated(self):
-        """Two lines minimum, or the separator is never exercised."""
-        r = clean.format_report(1, 0, {"ascii": 1}, [])
-        assert "XX" not in r
-        assert r.splitlines()[-1].strip() == "ascii      1"
+    def test_report_is_one_line_per_item(self):
+        """The report is line-structured: a header, then one line per
+        encoding, then one line per error.
+
+        This is what the newline join is for, and asserting the line
+        count is how to check it. An earlier version of this test
+        asserted that the mutmut sentinel "XX" was absent, which tests
+        the mutation tool rather than the code -- any other wrong
+        separator passed it.
+        """
+        r = clean.format_report(5, 2, {"ascii": 3, "cp1252": 2},
+                                ["/a: bad", "/b: bad"])
+        lines = r.splitlines()
+
+        # blank, header, 2 encodings, blank, "2 errors:", 2 errors
+        assert len(lines) == 8
+        assert lines[1].startswith("processed 5 files")
+        assert [l.strip() for l in lines[2:4]] == ["ascii      3",
+                                                   "cp1252     2"]
+        assert [l.strip() for l in lines[6:8]] == ["/a: bad", "/b: bad"]
+
+    def test_each_encoding_is_its_own_line(self):
+        """Scales with the number of encodings, so a separator that
+        merged them would change the count."""
+        for n in (1, 3, 5):
+            counts = {f"enc{i}": i for i in range(n)}
+            r = clean.format_report(1, 0, counts, [])
+            assert len(r.splitlines()) == 2 + n
 
     def test_zero_files(self):
         r = clean.format_report(0, 0, {}, [])
@@ -143,13 +166,18 @@ class TestBoilerplateReport:
         assert "(1,000 per book)" in boilerplate.format_report(1, 1000, [])
         assert "(500 per book)" in boilerplate.format_report(2, 1000, [])
 
-    def test_lines_are_newline_separated(self):
-        """The join separator is a bare newline.
+    def test_report_is_one_line_per_item(self):
+        """Header, then the error heading, then one line per error."""
+        r = boilerplate.format_report(1, 10, ["/a: bad", "/b: bad"])
+        lines = r.splitlines()
 
-        Needs two or more lines to be observable at all: with a single
-        line the separator is never used, which is why the error list is
-        populated here.
-        """
-        r = boilerplate.format_report(1, 10, ["/a.txt: bad"])
-        assert "XX" not in r
-        assert r.splitlines()[-1].strip() == "/a.txt: bad"
+        # blank, header, "2 errors:", 2 errors
+        assert len(lines) == 5
+        assert lines[1].startswith("wrote 1 books")
+        assert [l.strip() for l in lines[3:5]] == ["/a: bad", "/b: bad"]
+
+    def test_each_error_is_its_own_line(self):
+        for n in (1, 5, 20):
+            r = boilerplate.format_report(0, 0,
+                                          [f"/f{i}: bad" for i in range(n)])
+            assert len(r.splitlines()) == 3 + n
