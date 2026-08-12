@@ -21,7 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools import boilerplate, clean, metadata
+from tools import boilerplate, clean, manifest, metadata
 
 
 def run(module, argv, monkeypatch):
@@ -230,4 +230,68 @@ class TestMetadataCli:
     def test_no_arguments_exits_nonzero(self, monkeypatch):
         with pytest.raises(SystemExit) as e:
             run(metadata, [], monkeypatch)
+        assert e.value.code != 0
+
+
+class TestManifestCli:
+    """manifest.py doubles as the check on a completed run: how many books
+    were written, how many joined the catalogue, and how many share a
+    digest. That last number is the duplicate filename-based dedup cannot
+    see -- two book ids whose cleaned text is byte-identical."""
+
+    def _write(self, tmp_path, rows):
+        p = tmp_path / "m.tab"
+        with manifest.Manifest(p) as m:
+            for r in rows:
+                m.add(r)
+        return p
+
+    def test_summary_counts(self, tmp_path, monkeypatch, capsys):
+        meta = {"title": "A Book", "authors": "X", "language": "en",
+                "subjects": "S", "locc": "PS", "bookshelves": "",
+                "issued": "1971", "death_year": 1900}
+        p = self._write(tmp_path, [
+            manifest.book_row("1", digest="aaa", path="p1", encoding="ascii",
+                              nbytes=1, nparas=1, meta=meta),
+            manifest.book_row("2", digest="aaa", path="p2", encoding="ascii",
+                              nbytes=1, nparas=1, meta=meta),
+            manifest.book_row("3", digest="bbb", path="p3", encoding="ascii",
+                              nbytes=1, nparas=1, meta=None),
+        ])
+
+        rc = run(manifest, [p], monkeypatch)
+        err = capsys.readouterr().err
+
+        assert rc == 0
+        assert "3 books" in err
+        assert "2" in err            # two carry catalogue metadata
+        assert "duplicate digests:       1" in err
+
+    def test_prints_a_named_book(self, tmp_path, monkeypatch, capsys):
+        meta = {"title": "Divine Comedy", "authors": "Dante", "language": "en",
+                "subjects": "Poetry", "locc": "PQ", "bookshelves": "",
+                "issued": "2004", "death_year": 1321}
+        p = self._write(tmp_path, [
+            manifest.book_row("1007", digest="d", path="p", encoding="utf-8",
+                              nbytes=9, nparas=2, meta=meta)])
+
+        rc = run(manifest, [p, "1007"], monkeypatch)
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert "Divine Comedy" in out
+        assert "1321" in out
+
+    def test_unknown_book_is_reported(self, tmp_path, monkeypatch, capsys):
+        p = self._write(tmp_path, [
+            manifest.book_row("1", digest="d", path="p", encoding="ascii",
+                              nbytes=1, nparas=1, meta=None)])
+
+        rc = run(manifest, [p, "404"], monkeypatch)
+        assert rc == 0
+        assert "not in manifest" in capsys.readouterr().out
+
+    def test_no_arguments_exits_nonzero(self, monkeypatch):
+        with pytest.raises(SystemExit) as e:
+            run(manifest, [], monkeypatch)
         assert e.value.code != 0

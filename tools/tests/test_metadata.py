@@ -30,7 +30,7 @@ from hypothesis import strategies as st
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.metadata import (death_year, load_catalog, ndb_quote,
-                            primary_locc)
+                            ndb_sanitise, primary_locc)
 
 CATALOG_HEADER = "Text#,Type,Issued,Title,Language,Authors,Subjects,LoCC,Bookshelves\n"
 
@@ -192,12 +192,31 @@ class TestNdbQuote:
     def test_space_forces_quotes(self):
         assert ndb_quote("The Divine Comedy") == '"The Divine Comedy"'
 
-    def test_tab_forces_quotes(self):
-        assert ndb_quote("a\tb") == '"a\tb"'
+    def test_tab_becomes_a_space(self):
+        # A tab is a control character: ndb cannot carry it either.
+        assert ndb_quote("a\tb") == '"a b"'
 
-    def test_interior_quote_is_doubled(self):
-        # ndb escapes a quote by doubling it, not with a backslash.
-        assert ndb_quote('say "hi"') == '"say ""hi"""'
+    def test_ascii_quotes_become_typographic(self):
+        """ndb has no escape for the ASCII quote -- verified against
+        libtab directly: doubling, backslashes and a bare quote all fail
+        to reopen. 1.37% of catalogue entries contain one, so it is
+        substituted rather than dropped.
+
+        Opening or closing is chosen by position, the usual typographic
+        rule, so both of these read correctly.
+        """
+        assert ndb_quote('"Undo": A Novel') == '"\u201cUndo\u201d: A Novel"'
+        assert ndb_quote('The Number "e"') == '"The Number \u201ce\u201d"'
+
+    def test_no_ascii_quote_survives(self):
+        """The invariant that keeps the file parseable."""
+        for v in ('a"b', '"', '""', 'a "b" c', '"""'):
+            assert '"' not in ndb_quote(v)[1:-1]
+
+    def test_newline_becomes_a_space(self):
+        # ndb is line-structured; book 464's title contains a newline.
+        assert ndb_quote("a\nb") == '"a b"'
+        assert ndb_quote("a\r\nb") == '"a  b"'
 
     def test_empty_becomes_empty_quotes(self):
         # An empty value must still occupy the field, or the column
@@ -209,14 +228,25 @@ class TestNdbQuote:
         assert ndb_quote("#1 Bestseller") == '"#1 Bestseller"'
         assert ndb_quote("#tag") == '"#tag"'
 
+    def test_nil_sentinel_is_substituted(self):
+        """`nil` is libtab's on-disk spelling of an absent value, and it
+        reads back as empty even when quoted (tab_create.c:341). A book
+        titled "nil" would lose its title, so the token is substituted
+        rather than stored. Found by a property test."""
+        assert ndb_sanitise("nil") == "nil\u2009"
+        assert ndb_quote("nil") != "nil"
+
+    def test_nil_like_values_are_not_over_quoted(self):
+        # The sentinel is the exact lowercase token and nothing else.
+        assert ndb_quote("NIL") == "NIL"
+        assert ndb_quote("Nil") == "Nil"
+        assert ndb_quote("nilling") == "nilling"
+
     def test_none_becomes_empty_quotes(self):
         assert ndb_quote(None) == '""'
 
     def test_number_is_stringified(self):
         assert ndb_quote(1321) == "1321"
-
-    def test_newline_is_quoted(self):
-        assert ndb_quote("a\nb").startswith('"')
 
 
 @settings(max_examples=500)
@@ -243,19 +273,39 @@ def test_quoted_value_never_breaks_the_grammar(s):
 def _unquote(tok):
     """The reader's half of the grammar, for round-trip checking."""
     if tok.startswith('"') and tok.endswith('"') and len(tok) >= 2:
-        return tok[1:-1].replace('""', '"')
+        return tok[1:-1]
     return tok
+
+
+# What a value becomes is metadata's decision, not the test's. Importing
+# ndb_sanitise rather than restating the rules means the two cannot drift
+# -- an earlier version restated them and went stale twice in one sitting.
+_expected = ndb_sanitise
 
 
 @settings(max_examples=500)
 @given(st.text(max_size=200))
 def test_quote_then_parse_round_trips(s):
-    """The property that matters: a value survives being written and read.
+    """A value survives being written and read, modulo two documented
+    substitutions: ASCII quotes become typographic and newlines become
+    spaces, both because ndb cannot represent them at all.
 
     An earlier version asserted that quoting twice always yields a quoted
-    string, which hypothesis falsified with "0" -- a value that needs no
-    quoting stays bare however many times it is quoted. That was a wrong
-    claim about the function, not a bug in it. What the manifest actually
-    depends on is that quote-then-unquote is the identity.
+    string, which hypothesis falsified with "0" -- a value needing no
+    quoting stays bare however often it is quoted. That was a wrong claim
+    about the function rather than a bug in it.
     """
-    assert _unquote(ndb_quote(s)) == s
+    assert _unquote(ndb_quote(s)) == _expected(s)
+
+
+@settings(max_examples=500)
+@given(st.text(max_size=200))
+def test_quoted_form_is_always_parseable(s):
+    """The hard invariant: whatever goes in, the token contains no ASCII
+    quote inside the delimiters and no newline anywhere. Those are the
+    two characters the grammar cannot carry, and either one produces a
+    file that writes cleanly and cannot be reopened."""
+    q = ndb_quote(s)
+    body = q[1:-1] if q.startswith('"') else q
+    assert '"' not in body
+    assert "\n" not in q and "\r" not in q

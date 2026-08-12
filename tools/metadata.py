@@ -80,6 +80,50 @@ def primary_locc(locc):
     return m.group(1) if m else ""
 
 
+def ndb_sanitise(value):
+    """The substitutions ndb forces, without the quoting.
+
+    Exposed separately because callers and tests both need to know what a
+    value becomes: quoting is reversible, these are not. Two characters
+    cannot be represented at all --
+
+      * the ASCII double quote, which delimits a value and has no escape
+        (doubling, backslashes and a bare quote were each tested against
+        libtab and all three fail to reopen);
+      * any control character -- newline ends the line, NUL terminates
+        the string in the C layer and is rejected outright.
+
+    Quotes become their typographic equivalents, chosen by position, so
+    '"Undo": A Novel' stays readable. Control characters become spaces
+    rather than vanishing, so a newline mid-sentence does not fuse two
+    words together.
+    """
+    s = "" if value is None else str(value)
+
+    if '"' in s:
+        out = []
+        for i, c in enumerate(s):
+            if c == '"':
+                opening = i == 0 or s[i - 1].isspace() or s[i - 1] in "([{"
+                out.append("\u201c" if opening else "\u201d")
+            else:
+                out.append(c)
+        s = "".join(out)
+
+    s = "".join(" " if ord(c) < 0x20 or ord(c) == 0x7F else c for c in s)
+
+    # `nil` is libtab's on-disk spelling of an absent value: tab_create.c
+    # writes it for a null column and reads it back as empty, even when
+    # quoted. A book actually titled "nil" would therefore arrive with no
+    # title. Unrepresentable rather than mis-quoted, so it is substituted
+    # like the ASCII quote above -- with U+2009 thin space, which reads
+    # identically and is not the sentinel. Found by a property test; no
+    # hand-written case would have tried it.
+    if s == "nil":
+        s = "nil\u2009"
+    return s
+
+
 def ndb_quote(value):
     """Quote a value for libtab's ndb grammar.
 
@@ -89,14 +133,17 @@ def ndb_quote(value):
     middle of a title. Every title, author and subject in this corpus
     contains spaces, so nothing reaches the manifest unquoted.
 
-    A value needs quoting when it contains whitespace or a quote, when it
-    is empty (or the field would vanish and the row would change shape),
-    or when it starts with # (which begins an ndb comment, discarding the
-    rest of the line). Interior quotes are doubled, as ndb expects.
+    A value needs quoting when it contains whitespace, when it is empty
+    (or the field would vanish and the row would change shape), or when it
+    starts with # (which begins an ndb comment, discarding the rest of the
+    line). See ndb_sanitise for what cannot be represented at all.
+
+    The `nil` sentinel is handled in ndb_sanitise, because quoting cannot
+    save it -- libtab reads the value back as absent either way.
     """
-    s = "" if value is None else str(value)
-    if s == "" or s.startswith("#") or any(c in s for c in ' \t\n\r"'):
-        return '"' + s.replace('"', '""') + '"'
+    s = ndb_sanitise(value)
+    if s == "" or s.startswith("#") or " " in s:
+        return '"' + s + '"'
     return s
 
 

@@ -181,26 +181,44 @@ MUTANTS = [
     (
         "quote: forget the leading-# case",
         "tools/metadata.py",
-        's == "" or s.startswith("#") or any(',
-        's == "" or any(',
+        'if s == "" or s.startswith("#") or " " in s:',
+        'if s == "" or " " in s:',
     ),
     (
         "quote: forget empty values",
         "tools/metadata.py",
-        's == "" or s.startswith("#") or any(',
-        's.startswith("#") or any(',
+        'if s == "" or s.startswith("#") or " " in s:',
+        'if s.startswith("#") or " " in s:',
     ),
     (
-        "quote: interior quotes not doubled",
+        "quote: forget values containing a space",
         "tools/metadata.py",
-        "'\"' + s.replace('\"', '\"\"') + '\"'",
-        "'\"' + s + '\"'",
+        'if s == "" or s.startswith("#") or " " in s:',
+        'if s == "" or s.startswith("#"):',
     ),
     (
-        "quote: forget tab",
+        "sanitise: leave the ASCII quote in place",
         "tools/metadata.py",
-        "' \\t\\n\\r\"'",
-        "' \\n\\r\"'",
+        r'                out.append("\u201c" if opening else "\u201d")',
+        "                out.append(c)",
+    ),
+    (
+        "sanitise: always use the closing quote",
+        "tools/metadata.py",
+        '                opening = i == 0 or s[i - 1].isspace() or s[i - 1] in "([{"',
+        '                opening = False',
+    ),
+    (
+        "sanitise: leave control characters in place",
+        "tools/metadata.py",
+        '    s = "".join(" " if ord(c) < 0x20 or ord(c) == 0x7F else c for c in s)',
+        "    pass",
+    ),
+    (
+        "sanitise: delete control characters instead of spacing them",
+        "tools/metadata.py",
+        '    s = "".join(" " if ord(c) < 0x20 or ord(c) == 0x7F else c for c in s)',
+        '    s = "".join(c for c in s if ord(c) >= 0x20 and ord(c) != 0x7F)',
     ),
 
     # --- tools/metadata.py: the ground-truth fields --------------------
@@ -231,6 +249,39 @@ MUTANTS = [
         '    return m.group(1) if m else ""',
         "    return first",
     ),
+    # --- tools/manifest.py ---------------------------------------------
+    #
+    # The manifest is what everything downstream reads instead of
+    # re-deriving. A wrong row is not a crash, it is a quietly wrong
+    # corpus, so these check the fields that carry meaning.
+    (
+        "manifest: write None instead of an empty death year",
+        "tools/manifest.py",
+        'row["death_year"] = "" if dy is None else str(dy)',
+        'row["death_year"] = str(dy)',
+    ),
+    (
+        "manifest: drop books with no catalogue entry",
+        "tools/manifest.py",
+        '        row[f] = (meta or {}).get(f, "") or ""',
+        '        row[f] = meta[f]',
+    ),
+    (
+        "manifest: skip quoting on write",
+        "tools/manifest.py",
+        '            self._tab.set(r, col, ndb_quote(row.get(col, "")))',
+        '            self._tab.set(r, col, row.get(col, ""))',
+    ),
+    (
+        "manifest: drop the nil-sentinel substitution",
+        "tools/metadata.py",
+        '    if s == "nil":\n        s = "nil\\u2009"\n',
+        "",
+    ),
+    # No "forget to commit" mutant: libtab's close() flushes, verified at
+    # 5,000 rows, so dropping the commit() changes nothing observable. It
+    # is an equivalent mutation, not a gap -- recorded here so nobody adds
+    # it back expecting it to be caught.
     (
         "catalog: keep non-Text rows",
         "tools/metadata.py",
