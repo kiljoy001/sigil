@@ -55,11 +55,21 @@ class TestMarkerVariants:
         assert "should be named" not in out
 
     def test_this_spelling(self):
+        """Both markers, and both ends of the envelope.
+
+        Found by mutation testing: this test asserted only that the body
+        survived and the header was gone, so breaking the END pattern
+        alone was invisible -- the START still matched, the body was
+        still found, and the entire licence footer stayed in the book.
+        The footer assertion is the half that was missing.
+        """
         t = wrap("*** START OF THIS PROJECT GUTENBERG EBOOK FOO ***",
                  "*** END OF THIS PROJECT GUTENBERG EBOOK FOO ***")
         out = strip_boilerplate(t)
         assert "Real book text." in out
         assert "Title:" not in out
+        assert "should be named" not in out
+        assert "Updated editions" not in out
 
     def test_no_space_after_asterisks(self):
         # 12 START and 13 END lines in the sample use this form.

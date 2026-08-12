@@ -21,7 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools import boilerplate, clean
+from tools import boilerplate, clean, metadata
 
 
 def run(module, argv, monkeypatch):
@@ -179,3 +179,55 @@ class TestBoilerplateCli:
         src, dst = tmp_path / "s", tmp_path / "d"
         src.mkdir()
         assert run(boilerplate, [src, dst, "-j", "1"], monkeypatch) == 0
+
+
+class TestMetadataCli:
+    """metadata.py doubles as a coverage check on the catalogue: point it
+    at a CSV and it reports how many text works there are and what share
+    carry a usable date. That report is how a catalogue swap gets noticed.
+    """
+
+    def _cat(self, tmp_path, rows):
+        p = tmp_path / "cat.csv"
+        p.write_text(
+            "Text#,Type,Issued,Title,Language,Authors,Subjects,LoCC,"
+            "Bookshelves\n" + "".join(rows), encoding="utf-8")
+        return p
+
+    def test_reports_totals(self, tmp_path, monkeypatch, capsys):
+        c = self._cat(tmp_path, [
+            "1,Text,1971,A Book,en,\"Dante, 1265-1321\",Subj,PS,Shelf\n",
+            "2,Text,1971,No Dates,en,Anonymous,Subj,PS,Shelf\n",
+            "3,Sound,1971,A Recording,en,Someone,Subj,PS,Shelf\n",
+        ])
+        rc = run(metadata, [c], monkeypatch)
+
+        err = capsys.readouterr().err
+        assert rc == 0
+        assert "2 text works" in err, "the Sound row must not be counted"
+        assert "50.0%" in err, "one of two has a lifespan"
+
+    def test_prints_a_named_book(self, tmp_path, monkeypatch, capsys):
+        c = self._cat(tmp_path, [
+            "1007,Text,2004-08-02,Divine Comedy,en,"
+            "\"Dante Alighieri, 1265-1321\",Italian poetry,PQ,Shelf\n"])
+        rc = run(metadata, [c, "1007"], monkeypatch)
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Divine Comedy" in out
+        assert "1321" in out
+        assert "PQ" in out
+
+    def test_unknown_book_is_reported_not_a_crash(self, tmp_path,
+                                                  monkeypatch, capsys):
+        c = self._cat(tmp_path, ["1,Text,1971,A,en,B,C,PS,D\n"])
+        rc = run(metadata, [c, "99999"], monkeypatch)
+
+        assert rc == 0
+        assert "not in catalogue" in capsys.readouterr().out
+
+    def test_no_arguments_exits_nonzero(self, monkeypatch):
+        with pytest.raises(SystemExit) as e:
+            run(metadata, [], monkeypatch)
+        assert e.value.code != 0

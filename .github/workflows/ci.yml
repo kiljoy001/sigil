@@ -130,7 +130,7 @@ jobs:
       - name: Pipeline and differential tests
         run: |
           python -m pytest tools/tests -v \
-            --cov=tools.clean --cov=tools.boilerplate \
+            --cov=tools.clean --cov=tools.boilerplate --cov=tools.metadata \
             --cov-report=term-missing --cov-fail-under=90
 
   mutation:
