@@ -53,6 +53,37 @@ jobs:
           make check CFLAGS="-O1 -g -std=c11 -fsanitize=address,undefined \
             -fno-omit-frame-pointer -fno-sanitize-recover=all"
 
+  crap:
+    # Complexity x coverage. High complexity is fine when covered, untested
+    # code is fine when simple; CRAP flags the intersection, which is where
+    # a bug survives review.
+    #
+    # This gate is a ratchet, not an audit. SIGIL_CRAP_ALLOW is the count
+    # already over the line -- currently the two AVX2 filter kernels, which
+    # the -O0 coverage build never dispatches to because the runtime
+    # calibration picks another path there. New untested complexity fails
+    # the build; clearing the existing two means lowering the number.
+    #
+    # It earned its place immediately: it caught src/utf8_repair.c at 0%
+    # line coverage and CRAP 600, because that code was tested only through
+    # Python/ctypes and the C build never executed it.
+    runs-on: ubuntu-24.04
+    env:
+      SIGIL_CRAP_MAX: 30
+      SIGIL_CRAP_ALLOW: 2
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install lizard and gcovr
+        run: pip install lizard gcovr
+
+      - name: CRAP score
+        run: sh test/crap.sh
+
   python-pipeline:
     runs-on: ubuntu-24.04
     steps:
@@ -63,7 +94,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install test dependencies
-        run: pip install pytest hypothesis
+        run: pip install pytest hypothesis pytest-cov
 
       # Property tests included: encoding repair is exactly the kind of code
       # where the case you did not think of is the one in the corpus.
@@ -74,5 +105,13 @@ jobs:
       # embedder -- and two copies of one mapping drift silently, because
       # both outputs are valid UTF-8 and neither crashes. The runner has cc,
       # so this belongs here rather than in the C job.
+      # --cov-fail-under is the Python half of the CRAP ratchet. 50 is
+      # below the current 55% because the uncovered remainder is main() --
+      # argparse and the multiprocessing driver -- and pinning to the exact
+      # number would fail on any refactor that moves a line. Raise it when
+      # the CLI drivers get tests; do not lower it.
       - name: Pipeline and differential tests
-        run: python -m pytest tools/tests -v
+        run: |
+          python -m pytest tools/tests -v \
+            --cov=clean --cov=boilerplate \
+            --cov-report=term-missing --cov-fail-under=50

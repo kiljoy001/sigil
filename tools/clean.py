@@ -160,7 +160,12 @@ def clean_file(src: Path, dst: Path, dry_run: bool = False):
     out = text.encode("utf-8")
     changed = out != data
 
-    if not dry_run and changed or (not dry_run and not dst.exists()):
+    # Always write, changed or not: the destination is a parallel tree, and
+    # a file that needed no repair still has to appear in it. Writing only
+    # changed files would drop most of the corpus, since the majority is
+    # already valid. (This was previously an `and`/`or` chain that happened
+    # to do the right thing by operator precedence.)
+    if not dry_run:
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(out)
