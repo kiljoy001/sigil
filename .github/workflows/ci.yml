@@ -116,16 +116,22 @@ jobs:
       # embedder -- and two copies of one mapping drift silently, because
       # both outputs are valid UTF-8 and neither crashes. The runner has cc,
       # so this belongs here rather than in the C job.
-      # --cov-fail-under is the Python half of the CRAP ratchet. 50 is
-      # below the current 55% because the uncovered remainder is main() --
-      # argparse and the multiprocessing driver -- and pinning to the exact
-      # number would fail on any refactor that moves a line. Raise it when
-      # the CLI drivers get tests; do not lower it.
+      # --cov-fail-under is the Python half of the ratchet. 90 against an
+      # actual 98%: the margin absorbs a refactor that moves a few lines,
+      # and anything below 90 is a real regression. The four uncovered
+      # lines are the `if __name__` guards and two OSError branches that
+      # need a filesystem failure to reach.
+      #
+      # --cov takes a module name, and these are tools.clean and
+      # tools.boilerplate since tools became a package. Naming them
+      # `clean` and `boilerplate` measured modules nobody imported and
+      # reported 0% -- which failed the gate rather than passing it, but
+      # only because a floor existed at all.
       - name: Pipeline and differential tests
         run: |
           python -m pytest tools/tests -v \
-            --cov=clean --cov=boilerplate \
-            --cov-report=term-missing --cov-fail-under=50
+            --cov=tools.clean --cov=tools.boilerplate \
+            --cov-report=term-missing --cov-fail-under=90
 
   mutation:
     # Mutation testing in two sets, because they answer different questions.
