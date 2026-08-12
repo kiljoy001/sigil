@@ -32,6 +32,7 @@
 //
 
 #include "sigil_embed.h"
+#include "sigil_utf8.h"
 
 #ifdef SIGIL_WITH_OPENVINO
 
@@ -98,111 +99,34 @@ struct Impl {
 };
 
 /*
- * Coerce arbitrary bytes to valid UTF-8 before they reach the tokenizer.
+ * Repair invalid UTF-8 before it reaches the tokenizer.
  *
- * This is not cosmetic. openvino_tokenizers' SpecialTokensSplit hands the
- * text to PCRE2 compiled in UTF-8 mode without PCRE2_MATCH_INVALID_UTF,
- * and PCRE2 documents matching invalid UTF as undefined behaviour. In
- * practice the sljit-compiled matcher decodes a garbage codepoint from the
- * stray byte and indexes a character-class table with it: a wild read that
- * SIGSEGVs when the address happens to fall on an unmapped page and reads
- * silently otherwise. That address depends on mmap layout, so identical
- * input crashed ~60% of runs with ASLR on and 100% with it off -- weeks of
- * apparent "race" that was never a race (docs/FINDINGS.md).
+ * The implementation lives in src/utf8_repair.c -- plain C, always compiled,
+ * so it is covered by CI on machines with no OpenVINO, and checked against
+ * tools/clean.py's Python implementation by a differential property test
+ * (tools/tests/test_utf8_differential.py) so the two cannot drift.
  *
- * Project Gutenberg texts are full of the trigger: Windows-1252 bytes
- * (0x92 curly apostrophe and friends) inside files labelled UTF-8. So the
- * salvage is CP1252-aware rather than lossy: a byte that is not part of a
- * valid UTF-8 sequence is transcoded as CP1252/Latin-1, which turns 0x92
- * into a real U+2019 the embedding can use, instead of U+FFFD noise.
- * Hashing is unaffected -- sigil identity stays BLAKE3 over the original
- * bytes; only the embedder sees the repaired copy.
+ * Why it is needed at all: openvino_tokenizers runs PCRE2 in UTF-8 mode
+ * without PCRE2_MATCH_INVALID_UTF, and matching invalid UTF is documented
+ * undefined behaviour -- it read wild memory and segfaulted the indexer,
+ * intermittently, because whether the read faults depends on ASLR. See
+ * docs/FINDINGS.md.
  */
-static const uint16_t cp1252_c1[32] = {
-	/* 0x80 */ 0x20AC, 0xFFFD, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
-	/* 0x88 */ 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0xFFFD, 0x017D, 0xFFFD,
-	/* 0x90 */ 0xFFFD, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
-	/* 0x98 */ 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0xFFFD, 0x017E, 0x0178,
-};
-
-static void append_utf8(std::string &o, uint32_t cp)
-{
-	if (cp < 0x80) {
-		o += static_cast<char>(cp);
-	} else if (cp < 0x800) {
-		o += static_cast<char>(0xC0 | (cp >> 6));
-		o += static_cast<char>(0x80 | (cp & 0x3F));
-	} else {
-		o += static_cast<char>(0xE0 | (cp >> 12));
-		o += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-		o += static_cast<char>(0x80 | (cp & 0x3F));
-	}
-}
-
-/* Length of the valid UTF-8 sequence at p, or 0 if invalid. Rejects
- * overlong forms, surrogates and > U+10FFFF -- those are exactly as
- * undefined for PCRE2 as a lone continuation byte. */
-static size_t utf8_seq(const unsigned char *p, size_t left)
-{
-	if (p[0] < 0x80)
-		return 1;
-	if (p[0] < 0xC2)                     /* continuation or overlong */
-		return 0;
-	if (p[0] < 0xE0)
-		return (left >= 2 && (p[1] & 0xC0) == 0x80) ? 2 : 0;
-	if (p[0] < 0xF0) {
-		if (left < 3 || (p[1] & 0xC0) != 0x80 || (p[2] & 0xC0) != 0x80)
-			return 0;
-		if (p[0] == 0xE0 && p[1] < 0xA0)              /* overlong */
-			return 0;
-		if (p[0] == 0xED && p[1] >= 0xA0)             /* surrogate */
-			return 0;
-		return 3;
-	}
-	if (p[0] < 0xF5) {
-		if (left < 4 || (p[1] & 0xC0) != 0x80 ||
-		    (p[2] & 0xC0) != 0x80 || (p[3] & 0xC0) != 0x80)
-			return 0;
-		if (p[0] == 0xF0 && p[1] < 0x90)              /* overlong */
-			return 0;
-		if (p[0] == 0xF4 && p[1] >= 0x90)             /* > U+10FFFF */
-			return 0;
-		return 4;
-	}
-	return 0;
-}
-
 static std::string to_valid_utf8(const char *text, size_t len)
 {
-	const unsigned char *p = reinterpret_cast<const unsigned char *>(text);
-	size_t i = 0;
-
-	/* Fast path: scan first, copy only if something is wrong. */
-	while (i < len) {
-		size_t n = utf8_seq(p + i, len - i);
-		if (n == 0)
-			break;
-		i += n;
-	}
-	if (i == len)
+	/* Fast path: the overwhelmingly common case is text that is already
+	 * valid, and it must cost one scan and no copy. */
+	if (sigil_utf8_valid(text, len))
 		return std::string(text, len);
 
-	std::string o;
-	o.reserve(len + 8);
-	o.append(text, i);
-	while (i < len) {
-		size_t n = utf8_seq(p + i, len - i);
-		if (n != 0) {
-			o.append(text + i, n);
-			i += n;
-			continue;
-		}
-		unsigned char b = p[i++];
-		append_utf8(o, b < 0x80 ? 0xFFFDu :          /* unreachable */
-		               b < 0xA0 ? cp1252_c1[b - 0x80] :
-		               static_cast<uint32_t>(b));    /* Latin-1 */
-	}
-	return o;
+	size_t n = 0;
+	char *fixed = sigil_utf8_repair(text, len, &n);
+	if (fixed == nullptr)
+		return std::string();      /* OOM: empty beats malformed */
+
+	std::string out(fixed, n);
+	std::free(fixed);
+	return out;
 }
 
 int embed_one(Impl *im, const char *text, size_t len, float *out);

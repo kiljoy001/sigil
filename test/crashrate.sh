@@ -50,6 +50,16 @@ while [ "$i" -le "$N" ]; do
 	timeout "$TMO" "$BIN" "$@" >/dev/null 2>&1
 	rc=$?
 	t1=$(date +%s)
+	# 126/127 mean the binary could not be run at all (not executable, or
+	# a failed link left it missing). Those are not passes, and reporting
+	# them as 0/N crashed is exactly the false green this harness exists
+	# to prevent -- one such run already claimed a fix that had not been
+	# built. Abort rather than average it in.
+	if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
+		echo "  trial $i: rc=$rc -- cannot execute $BIN (build failed?)" >&2
+		echo "ABORT: harness cannot run the binary; no rate reported" >&2
+		exit 2
+	fi
 	# 124 = timeout (hang, counted separately as a crash: it is not a pass)
 	# >= 128 = killed by signal (139 SIGSEGV, 134 SIGABRT, ...)
 	if [ "$rc" -ge 128 ] || [ "$rc" -eq 124 ]; then

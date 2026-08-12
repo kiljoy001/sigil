@@ -82,7 +82,7 @@ BLAKE3 = third_party/blake3/blake3.c third_party/blake3/blake3_dispatch.c \
 
 SRC  = $(BLAKE3) src/sigil.c src/trit.c src/store.c src/scan_scalar.c \
        src/scan_x86.c src/scan_sse.c src/scan_neon.c src/scan_generic.c src/scan_range.c \
-       src/simhash.c src/embed_llama.c
+       src/simhash.c src/embed_llama.c src/utf8_repair.c
 OBJ  = $(SRC:.c=.o) $(OVOBJ)
 LIB  = libsigil.a
 
