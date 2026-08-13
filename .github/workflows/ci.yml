@@ -105,7 +105,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install test dependencies
-        run: pip install pytest hypothesis pytest-cov libtab blake3
+        run: pip install pytest hypothesis pytest-cov pytest-bdd libtab blake3
 
       # Property tests included: encoding repair is exactly the kind of code
       # where the case you did not think of is the one in the corpus.
@@ -127,6 +127,13 @@ jobs:
       # `clean` and `boilerplate` measured modules nobody imported and
       # reported 0% -- which failed the gate rather than passing it, but
       # only because a floor existed at all.
+      # Gherkin scenarios describing what the pipeline is for, written as
+      # a specification rather than derived from the implementation. Every
+      # step drives the real components -- a fake would encode the same
+      # model that was wrong when 128 books went missing.
+      - name: Behaviour scenarios
+        run: python -m pytest features -v
+
       - name: Pipeline and differential tests
         run: |
           python -m pytest tools/tests -v \
