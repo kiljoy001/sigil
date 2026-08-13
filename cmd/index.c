@@ -23,13 +23,24 @@
 #include <9p.h>
 
 #include "sigilfs.h"
+#include "sigil_split.h"
 
 enum {
-	Maxfile   = 4*1024*1024,   /* skip anything larger: not prose */
-	Minpara   = 40,            /* shorter than this embeds to noise */
-	Maxpara   = 4000,          /* split beyond this */
+	/* Books, not prose fragments. 4 MB silently skipped 128 books of
+	 * the Gutenberg corpus holding 3.0M paragraphs -- 4% of the whole
+	 * index -- and the skip was a bare `return 0`, indistinguishable
+	 * from a file with nothing in it. p99.9 of that corpus is 5.3 MB;
+	 * 32 MB leaves only 12 outliers, the largest of which is 147 MB
+	 * and is not a novel. Skips are counted now, so the next one is
+	 * visible rather than inferred from a paragraph total that does
+	 * not add up. */
+	Maxfile   = 32*1024*1024,
 	Maxdepth  = 32,
 };
+
+/* Paragraph bounds live in sigil_split.h, with the splitter that uses
+ * them. A second copy here is how the three implementations drifted
+ * apart in the first place. */
 
 /* Extensions worth reading. Deliberately narrow: extracting garbage from a
  * binary and embedding it is worse than skipping the file. */
@@ -58,47 +69,42 @@ wanted(char *name)
  * Split on blank lines, the plain-text paragraph convention. Very short runs
  * are dropped and very long ones cut at a sentence boundary where possible.
  */
+/*
+ * Add every paragraph in buf to the store.
+ *
+ * The splitting itself lives in src/split.c, shared with tools/ and the
+ * fuzzer. It used to be inline here and re-implemented twice elsewhere,
+ * which drifted: the manifest counted 77,367,817 paragraphs for a corpus
+ * this code split into 74,905,358.
+ */
+struct addctx {
+	Sigilfs *f;
+	char *path;
+	char *buf;
+	int added;
+};
+
+static void
+addone(const sigil_chunk_t *c, void *arg)
+{
+	struct addctx *a = arg;
+
+	if(br_add_at(a->f->store, a->path, c->para, a->buf + c->off, c->len,
+	             nil, 0, c->off) >= 0)
+		a->added++;
+}
+
 static int
 addparas(Sigilfs *f, char *path, char *buf, long n)
 {
-	char *p, *end, *q, *cut;
-	int para = 1, added = 0;
-	long len;
+	struct addctx a;
 
-	end = buf + n;
-	for(p = buf; p < end; ){
-		while(p < end && (*p == '\n' || *p == '\r' || *p == ' ' || *p == '\t'))
-			p++;
-		if(p >= end)
-			break;
-		/* find the next blank line */
-		for(q = p; q < end - 1; q++)
-			if(q[0] == '\n' && (q[1] == '\n' || q[1] == '\r'))
-				break;
-		if(q >= end - 1)
-			q = end;
-		len = q - p;
-
-		while(len > Maxpara){
-			cut = p + Maxpara;
-			while(cut > p + Maxpara/2 && *cut != '.' && *cut != '\n')
-				cut--;
-			if(cut <= p + Maxpara/2)
-				cut = p + Maxpara;
-			if(cut - p >= Minpara)
-				if(br_add_at(f->store, path, para++, p, cut - p,
-				             nil, 0, p - buf) >= 0)
-					added++;
-			len -= cut - p;
-			p = cut;
-		}
-		if(len >= Minpara)
-			if(br_add_at(f->store, path, para++, p, len, nil, 0,
-			             p - buf) >= 0)
-				added++;
-		p = q + 1;
-	}
-	return added;
+	a.f = f;
+	a.path = path;
+	a.buf = buf;
+	a.added = 0;
+	sigil_split(buf, (size_t)n, addone, &a);
+	return a.added;
 }
 
 static int
@@ -116,6 +122,12 @@ onefile(Sigilfs *f, char *path)
 		return 0;
 	}
 	if(d->length == 0 || d->length > Maxfile){
+		if(d->length > Maxfile){
+			f->nskipped++;
+			if(tracing)
+				fprint(2, "SKIP %s (%lld bytes > Maxfile)\n",
+				       path, (vlong)d->length);
+		}
 		free(d); close(fd);
 		return 0;
 	}

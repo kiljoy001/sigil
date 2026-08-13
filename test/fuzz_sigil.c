@@ -24,57 +24,30 @@
 #include <string.h>
 
 #include "sigil.h"
-
-enum {
-	Minpara = 40,      /* matches cmd/index.c */
-	Maxpara = 4000,
-};
+#include "sigil_split.h"
 
 /*
- * The paragraph splitter from cmd/index.c, reproduced here because that file
- * is plan9port C and cannot be linked against a libFuzzer harness. Keeping a
- * copy is a real cost -- it can drift -- but the alternative is leaving the
- * one parser that touches arbitrary bytes untested.
+ * The splitter, called rather than copied.
+ *
+ * This file used to carry its own transcription of cmd/index.c's rule,
+ * with a comment admitting it could drift. It did: three copies existed
+ * and the manifest disagreed with the index by 3.2% of the corpus. Now
+ * there is one, in src/split.c, and fuzzing it here exercises the real
+ * code rather than a lookalike.
  */
+static void
+hash_chunk(const sigil_chunk_t *c, void *arg)
+{
+	const char *buf = arg;
+	sigil_t s;
+
+	sigil_generate_para(buf + c->off, c->len, c->para, 0, 0, NULL, &s);
+}
+
 static void
 split_and_hash(const char *buf, size_t n)
 {
-	const char *p, *end, *q, *cut;
-	uint32_t para = 1;
-	size_t len;
-	sigil_t s;
-
-	end = buf + n;
-	for (p = buf; p < end; ) {
-		while (p < end && (*p == '\n' || *p == '\r' ||
-		                   *p == ' ' || *p == '\t'))
-			p++;
-		if (p >= end)
-			break;
-		for (q = p; q < end - 1; q++)
-			if (q[0] == '\n' && (q[1] == '\n' || q[1] == '\r'))
-				break;
-		if (q >= end - 1)
-			q = end;
-		len = (size_t)(q - p);
-
-		while (len > Maxpara) {
-			cut = p + Maxpara;
-			while (cut > p + Maxpara / 2 && *cut != '.' &&
-			       *cut != '\n')
-				cut--;
-			if (cut <= p + Maxpara / 2)
-				cut = p + Maxpara;
-			if ((size_t)(cut - p) >= Minpara)
-				sigil_generate_para(p, (size_t)(cut - p),
-				                    para++, 0, 0, NULL, &s);
-			len -= (size_t)(cut - p);
-			p = cut;
-		}
-		if (len >= Minpara)
-			sigil_generate_para(p, len, para++, 0, 0, NULL, &s);
-		p = q + 1;
-	}
+	sigil_split(buf, n, hash_chunk, (void *)buf);
 }
 
 int

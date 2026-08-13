@@ -35,6 +35,7 @@ statstext(Sigilfs *f)
 		"lsh_bits\t%d\n"
 		"simhash_seed\t%llux\n"
 		"indexed\t%llud\n"
+		"skipped\t%llud\n"
 		"thresh\t%d\n"
 		"mounts\t%d\n",
 		f->nrecords, f->nscans,
@@ -43,7 +44,7 @@ statstext(Sigilfs *f)
 		br_have_embedder(f->store) ? br_embedder_name(f->store)
 		    : "NONE -- lsh bits are a byte hash, not semantic",
 		f->embed_dim, f->lsh_bits, f->simhash_seed,
-		f->nindexed, f->thresh,
+		f->nindexed, f->nskipped, f->thresh,
 		f->nmounts);
 
 	for(m = f->mounts; m != nil && n < sizeof(buf) - 128; m = m->next)

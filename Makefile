@@ -82,7 +82,7 @@ BLAKE3 = third_party/blake3/blake3.c third_party/blake3/blake3_dispatch.c \
 
 SRC  = $(BLAKE3) src/sigil.c src/trit.c src/store.c src/scan_scalar.c \
        src/scan_x86.c src/scan_sse.c src/scan_neon.c src/scan_generic.c src/scan_range.c \
-       src/simhash.c src/embed_llama.c src/utf8_repair.c
+       src/simhash.c src/embed_llama.c src/utf8_repair.c src/split.c
 OBJ  = $(SRC:.c=.o) $(OVOBJ)
 LIB  = libsigil.a
 
@@ -207,7 +207,7 @@ test/fuzz_sigil: test/fuzz_sigil.c
 		-DBLAKE3_NO_SSE41 -DBLAKE3_NO_SSE2 -DBLAKE3_USE_NEON=0 \
 		$< $(BLAKE3) src/sigil.c src/trit.c src/store.c \
 		src/scan_scalar.c src/scan_x86.c src/scan_sse.c src/scan_neon.c \
-		src/scan_generic.c src/scan_range.c src/simhash.c -o $@
+		src/scan_generic.c src/scan_range.c src/simhash.c src/split.c -o $@
 
 fuzz: test/fuzz_sigil
 	@mkdir -p test/fuzz-corpus

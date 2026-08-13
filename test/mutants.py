@@ -313,17 +313,26 @@ MUTANTS = [
         "        if d.exists() and d.stat().st_mtime >= Path(src).stat().st_mtime:",
         "        if False:",
     ),
+    # The splitter defines the unit of identity, so a wrong bound here
+    # changes what every record hashes over. It lives in C and is shared
+    # by cmd/index.c, tools/ and the fuzzer.
     (
-        "pipeline: drop over-long paragraphs instead of chunking",
-        "tools/pipeline.py",
-        "            n += (len(p) + MAX_PARA - 1) // MAX_PARA",
-        "            pass",
+        "split: drop over-long paragraphs instead of chunking",
+        "src/split.c",
+        "		while (len > SIGIL_MAXPARA) {",
+        "		while (0) {",
     ),
     (
-        "pipeline: count paragraphs below the indexer's minimum",
-        "tools/pipeline.py",
-        "        if MIN_PARA <= len(p) <= MAX_PARA:",
-        "        if len(p) <= MAX_PARA:",
+        "split: keep chunks below the minimum",
+        "src/split.c",
+        "		if (len >= SIGIL_MINPARA) {",
+        "		if (1) {",
+    ),
+    (
+        "split: paragraph ends only at \\n\\n, not \\n\\r",
+        "src/split.c",
+        "			if (q[0] == '\\n' && (q[1] == '\\n' || q[1] == '\\r'))",
+        "			if (q[0] == '\\n' && q[1] == '\\n')",
     ),
     (
         "boilerplate: index LICENSE.txt as a book",

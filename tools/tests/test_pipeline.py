@@ -88,13 +88,21 @@ class TestCountParagraphs:
         assert pipeline.count_paragraphs("a" * pipeline.MIN_PARA) == 1
         assert pipeline.count_paragraphs("a" * (pipeline.MIN_PARA - 1)) == 0
         assert pipeline.count_paragraphs("a" * pipeline.MAX_PARA) == 1
-        assert pipeline.count_paragraphs("a" * (pipeline.MAX_PARA + 1)) == 2
+        # MAX_PARA + 1 leaves a 1-byte remainder, below MIN_PARA, which
+        # the splitter drops -- so one chunk. See test_split.py.
+        assert pipeline.count_paragraphs("a" * (pipeline.MAX_PARA + 1)) == 1
 
-    def test_chunk_count_is_exact(self):
-        """Ceiling division, checked either side of a boundary."""
-        assert pipeline.count_paragraphs("a" * (2 * pipeline.MAX_PARA)) == 2
-        assert pipeline.count_paragraphs(
-            "a" * (2 * pipeline.MAX_PARA + 1)) == 3
+    def test_chunk_count_matches_the_indexer(self):
+        """Not ceiling division -- the splitter advances a cursor and
+        drops a remainder below MIN_PARA. An earlier version of this test
+        asserted the ceiling, which is what the removed Python
+        reimplementation did and part of why the manifest disagreed with
+        the index by 3.2%. tools/tests/test_split.py covers the rule
+        itself; this checks the pipeline calls it.
+        """
+        from tools.split import count as c
+        for n in (2 * pipeline.MAX_PARA, 2 * pipeline.MAX_PARA + 1, 9000):
+            assert pipeline.count_paragraphs("a" * n) == c("a" * n)
 
     def test_chunks_accumulate_across_paragraphs(self):
         """n += rather than n =: two long blocks are six records, not

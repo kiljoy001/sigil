@@ -100,8 +100,11 @@ libtab.a: $(TABSRC)
 
 sigilfs-tcp: CPPFLAGS += -DSIGIL_NO_LIBTHREAD
 
+# -I../include for sigil_split.h: index.c calls the shared splitter rather
+# than carrying its own copy. That header is plain C with no plan9port
+# types, so 9c can read it.
 %.o: %.c sigilfs.h
-	$(CC9) -I$(LIBTAB_SRC) -c $<
+	$(CC9) -I$(LIBTAB_SRC) -I$(SIGIL_ROOT)/include -c $<
 
 clean:
 	rm -f *.o *.a sigilfs

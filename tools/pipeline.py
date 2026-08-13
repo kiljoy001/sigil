@@ -63,30 +63,8 @@ from tools import boilerplate, clean
 from tools.manifest import Manifest, book_row
 from tools.metadata import load_catalog
 
-# Matches Minpara/Maxpara in cmd/index.c: the manifest's paragraph count
-# has to mean the same thing the indexer will count.
-MIN_PARA = 40
-MAX_PARA = 4000
-
-
-def count_paragraphs(text):
-    """How many paragraphs the indexer will take from this text.
-
-    Duplicates the splitting rule in cmd/index.c rather than importing it
-    -- that file is plan9port C. Kept deliberately simple: this is a
-    count for the manifest, not the split itself, and a discrepancy shows
-    up immediately as a mismatch against /stats after indexing.
-    """
-    n = 0
-    for para in text.split("\n\n"):
-        p = para.strip()
-        if MIN_PARA <= len(p) <= MAX_PARA:
-            n += 1
-        elif len(p) > MAX_PARA:
-            # index.c chunks an over-long paragraph rather than dropping
-            # it, so count the chunks.
-            n += (len(p) + MAX_PARA - 1) // MAX_PARA
-    return n
+from tools.split import MAX_PARA, MIN_PARA  # noqa: F401
+from tools.split import count as count_paragraphs  # noqa: F401
 
 
 def digest_text(text):

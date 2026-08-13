@@ -54,6 +54,12 @@ struct Sigilfs {
 	uvlong nscans;
 	uvlong nrecords;
 	uvlong nindexed;   /* files read, not paragraphs */
+	/* Files passed over because they exceed Maxfile. Reported in
+	 * /stats because the first full-corpus run skipped 128 books --
+	 * 3.0M paragraphs, 4% of the index -- with no indication at all,
+	 * and the loss was only found by reconciling two counts that
+	 * disagreed for unrelated reasons. */
+	uvlong nskipped;
 	int thresh;        /* Hamming radius for /similar */
 };
 
