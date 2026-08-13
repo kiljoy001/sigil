@@ -82,7 +82,8 @@ BLAKE3 = third_party/blake3/blake3.c third_party/blake3/blake3_dispatch.c \
 
 SRC  = $(BLAKE3) src/sigil.c src/trit.c src/store.c src/scan_scalar.c \
        src/scan_x86.c src/scan_sse.c src/scan_neon.c src/scan_generic.c src/scan_range.c \
-       src/simhash.c src/embed_llama.c src/utf8_repair.c src/split.c
+       src/simhash.c src/embed_llama.c src/utf8_repair.c src/split.c \
+       src/veccache.c
 OBJ  = $(SRC:.c=.o) $(OVOBJ)
 LIB  = libsigil.a
 
@@ -135,11 +136,15 @@ test/semantic: test/semantic.c $(LIB)
 test/eval: test/eval.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) -o $@ $(LDFLAGS) $(LLAMA_LDFLAGS) $(LDLIBS)
 
-check: test/differential test/unit test/bridge test/oom
+test/veccache: test/veccache.c $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< $(LIB) $(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS) -lstdc++
+
+check: test/differential test/unit test/bridge test/oom test/veccache
 	./test/differential
 	./test/unit
 	./test/bridge
 	./test/oom
+	./test/veccache
 
 THEFT ?= $(HOME)/Repo/libtab/tests/vendor/theft
 
