@@ -53,6 +53,27 @@ jobs:
           make check CFLAGS="-O1 -g -std=c11 -fsanitize=address,undefined \
             -fno-omit-frame-pointer -fno-sanitize-recover=all"
 
+  fuzz:
+    # Short bounded runs, not a fuzzing campaign. 60 seconds each will not
+    # find a deep bug, but it does prove the harnesses still build and
+    # that the committed corpus -- including the crash inputs found
+    # previously -- is still handled. Neither target ran in CI at all
+    # until the cache was added and the omission was noticed.
+    #
+    # The real campaigns are run locally with a longer -max_total_time.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Text ingestion paths (splitter, hashing, trits, scan)
+        run: make fuzz FUZZCC=clang FUZZTIME=60
+
+      # The cache loader parses a file it did not write: a crash leaves a
+      # partial line, and recovery is the worst moment for an
+      # out-of-bounds read.
+      - name: Embedding cache loader
+        run: make fuzz-veccache FUZZCC=clang FUZZTIME=60
+
   crap:
     # Complexity x coverage. High complexity is fine when covered, untested
     # code is fine when simple; CRAP flags the intersection, which is where

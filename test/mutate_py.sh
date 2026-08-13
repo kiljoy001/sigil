@@ -57,9 +57,14 @@ def suite_passes(path):
     failure counts as caught -- the compiler refusing the mutation is a
     detection, just an early one."""
     if path.startswith(("src/", "cmd/")):
+        # Every C test binary, not just unit: veccache.c is covered by
+        # test/veccache, and building only test/unit meant six mutants
+        # "survived" because nothing that could catch them ever ran.
         return (run("make -s libsigil.a")
                 and run("make -s test/unit")
+                and run("make -s test/veccache")
                 and run("./test/unit")
+                and run("./test/veccache")
                 and run(f"{PY} -m pytest tools/tests -q"))
     return run(f"{PY} -m pytest tools/tests -q")
 
@@ -97,6 +102,7 @@ for name, path, old, new in MUTANTS:
 # The C mutants rebuilt libsigil; leave the tree as we found it.
 run("make -s libsigil.a")
 run("make -s test/unit")
+run("make -s test/veccache")
 
 print(f"\ncaught {caught}, survived {survived}, broken {broken}")
 if survived:

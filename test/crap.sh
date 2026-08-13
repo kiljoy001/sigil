@@ -45,6 +45,7 @@ SRC="../../third_party/blake3/blake3.c ../../third_party/blake3/blake3_dispatch.
      ../../src/store.c ../../src/scan_scalar.c ../../src/scan_x86.c ../../src/scan_sse.c \
      ../../src/scan_neon.c ../../src/scan_generic.c ../../src/scan_range.c \
      ../../src/simhash.c ../../src/embed_llama.c ../../src/utf8_repair.c \
+     ../../src/split.c ../../src/veccache.c \
      ../../cmd/bridge.c"
 F="-O0 -g --coverage -I$R/include -I$R/third_party/blake3 -DBLAKE3_NO_AVX512 \
    -DBLAKE3_NO_AVX2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_SSE2 -DBLAKE3_USE_NEON=0"
@@ -66,10 +67,16 @@ gcc $F -c "$R/test/oom.c" -o o.o && \
 	gcc --coverage -o oomt o.o $LIBOBJ \
 	    -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc $L
 
+# The embedding cache and the splitter: both define behaviour the rest of
+# the system depends on, and neither was in this list until it was
+# noticed that CRAP had been silently ignoring them.
+gcc $F -c "$R/test/veccache.c" -o v.o && gcc --coverage -o vct v.o $LIBOBJ $L
+
 ./unit >/dev/null
 ./brt  >/dev/null
 ./diff >/dev/null
 ./oomt >/dev/null
+./vct  >/dev/null
 
 cd "$R"
 "$LIZARD" src/ cmd/ --csv 2>/dev/null > build/cov/lz.csv

@@ -358,4 +358,50 @@ MUTANTS = [
         'r"^[\ufeff \\t]*\\*\\*\\*\\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.{0,300}?\\*\\*\\*"',
         'r"^[ \\t]*\\*\\*\\*\\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.{0,300}?\\*\\*\\*"',
     ),
+
+    # --- src/veccache.c -------------------------------------------------
+    #
+    # The cache exists so 13 hours of GPU work survives a crash. Every
+    # mutant here is a way it could appear to work while losing data.
+    (
+        "veccache: model not part of the key",
+        "src/veccache.c",
+        "\t\tif (ml != strlen(c->model) ||\n"
+        "\t\t    strncmp(m, c->model, ml) != 0)\n"
+        "\t\t\tcontinue;",
+        "\t\t(void)ml;",
+    ),
+    (
+        "veccache: a duplicate overwrites the first",
+        "src/veccache.c",
+        "\t\t\tfree(vec);\n\t\t\treturn 0;",
+        "\t\t\tfree(c->tab[i].vec);\n\t\t\tc->tab[i].vec = vec;\n"
+        "\t\t\treturn 0;",
+    ),
+    (
+        "veccache: probe compares only the bucket key",
+        "src/veccache.c",
+        "\t\tif (memcmp(c->tab[i].hash, hash, HASHLEN) == 0) {\n"
+        "\t\t\tsize_t d;",
+        "\t\tif (memcmp(c->tab[i].hash, hash, 8) == 0) {\n"
+        "\t\t\tsize_t d;",
+    ),
+    (
+        "veccache: sync does not flush",
+        "src/veccache.c",
+        "\tif (fflush(c->fp) != 0)\n\t\treturn -1;",
+        "\t;",
+    ),
+    (
+        "veccache: a short line is loaded anyway",
+        "src/veccache.c",
+        "\t\t               c->dim * sizeof *vec) != c->dim * sizeof *vec) {",
+        "\t\t               c->dim * sizeof *vec) == (size_t)-1) {",
+    ),
+    # No "hash length not checked" mutant: it is equivalent. With the
+    # guard removed, hex_decode reads 64 characters, hits the closing
+    # quote at index 4 of a short hash, finds it is not a hex digit and
+    # returns -1 -- so the line is rejected either way. The guard is a
+    # cheap early exit, not the thing enforcing correctness. Recorded so
+    # nobody adds it back expecting a kill.
 ]

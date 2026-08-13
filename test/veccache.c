@@ -250,6 +250,295 @@ test_duplicate_keeps_the_first(void)
 	sigil_veccache_close(c);
 }
 
+/* --- durability ---------------------------------------------------------- */
+
+static void
+test_sync(void)
+{
+	sigil_veccache_t *c;
+	uint8_t h[32];
+	float in[DIM];
+	FILE *fp;
+	char line[4096];
+	int lines = 0;
+
+	/* sync() is the whole durability contract: without it a crash loses
+	 * whatever libc was still holding. CRAP found this at 0% coverage --
+	 * the one function in the cache whose entire job is not losing data,
+	 * untested. */
+	unlink(PATH);
+	fill(h, 21);
+	vec_of(in, 1.0f);
+
+	c = sigil_veccache_open(PATH, "minilm", DIM);
+	sigil_veccache_put(c, h, in);
+
+	/* Before the flush the line may still be in libc's buffer. After it,
+	 * another reader must be able to see it while this handle is open. */
+	ok(sigil_veccache_sync(c, 0) == 0, "sync succeeds");
+
+	fp = fopen(PATH, "r");
+	while (fgets(line, sizeof line, fp) != NULL)
+		lines++;
+	fclose(fp);
+	eqsz((size_t)lines, 1, "the record is on disk before close");
+
+	ok(sigil_veccache_sync(c, 1) == 0, "sync with fsync succeeds");
+	sigil_veccache_close(c);
+
+	/* And a NULL cache is a caller error, not a crash. */
+	ok(sigil_veccache_sync(NULL, 0) != 0, "sync(NULL) reports failure");
+}
+
+static void
+test_null_arguments(void)
+{
+	uint8_t h[32];
+	float v[DIM];
+
+	fill(h, 1);
+	vec_of(v, 1.0f);
+
+	/* The bridge calls these on a path where the cache may be absent --
+	 * an unconfigured cache must be a miss, not a segfault. */
+	ok(sigil_veccache_get(NULL, h, v) != 0, "get(NULL) misses");
+	ok(sigil_veccache_put(NULL, h, v) != 0, "put(NULL) fails");
+	eqsz(sigil_veccache_count(NULL), 0, "count(NULL) is zero");
+	sigil_veccache_stats(NULL, NULL, NULL);   /* must not crash */
+	sigil_veccache_close(NULL);               /* must not crash */
+	ok(1, "NULL handles are tolerated throughout");
+
+	ok(sigil_veccache_open(NULL, "m", DIM) == NULL, "open(NULL path)");
+	ok(sigil_veccache_open(PATH, NULL, DIM) == NULL, "open(NULL model)");
+	ok(sigil_veccache_open(PATH, "m", 0) == NULL, "open(dim 0)");
+}
+
+static void
+test_unwritable_path(void)
+{
+	/* A cache that cannot be created must say so rather than returning a
+	 * handle that silently discards every vector. */
+	ok(sigil_veccache_open("/proc/nonexistent/x.jsonl", "m", DIM) == NULL,
+	   "open on an unwritable path fails");
+}
+
+static void
+test_odd_floats(void)
+{
+	sigil_veccache_t *c;
+	uint8_t h[32];
+	float in[DIM], out[DIM];
+
+	/* An embedder that emits inf or NaN is broken, but the cache must
+	 * store what it was given rather than silently turning it into zero
+	 * -- a zero vector is a plausible-looking embedding and would be
+	 * indistinguishable from a real one downstream. */
+	unlink(PATH);
+	fill(h, 31);
+	in[0] = 1.0f / 0.0f;              /* +inf */
+	in[1] = -1.0f / 0.0f;             /* -inf */
+	in[2] = 0.0f / 0.0f;              /* NaN */
+	in[3] = 65504.0f;                 /* float16 max */
+	in[4] = 131072.0f;                /* overflows float16 */
+	in[5] = 1e-8f;                    /* underflows to zero */
+	in[6] = 0.5f;
+	in[7] = -0.5f;
+
+	c = sigil_veccache_open(PATH, "minilm", DIM);
+	ok(sigil_veccache_put(c, h, in) == 0, "odd floats are stored");
+	sigil_veccache_close(c);
+
+	c = sigil_veccache_open(PATH, "minilm", DIM);
+	ok(sigil_veccache_get(c, h, out) == 0, "and read back");
+	ok(isinf(out[0]) && out[0] > 0, "+inf survives");
+	ok(isinf(out[1]) && out[1] < 0, "-inf survives");
+	ok(isnan(out[2]), "NaN survives as NaN, not zero");
+	ok(isinf(out[4]), "a value over float16 max saturates to inf");
+	ok(out[5] == 0.0f, "an underflow becomes zero");
+	ok(out[6] == 0.5f && out[7] == -0.5f, "ordinary values are exact");
+	sigil_veccache_close(c);
+}
+
+static void
+test_malformed_lines(void)
+{
+	sigil_veccache_t *c;
+	FILE *fp;
+	uint8_t h[32];
+	float in[DIM];
+
+	/* A cache file is edited by nothing but this code, but it lives on
+	 * disk next to everything else and a stray line must cost that line
+	 * rather than the file. */
+	unlink(PATH);
+	fill(h, 41);
+	vec_of(in, 1.0f);
+	c = sigil_veccache_open(PATH, "minilm", DIM);
+	sigil_veccache_put(c, h, in);
+	sigil_veccache_close(c);
+
+	fp = fopen(PATH, "a");
+	fprintf(fp, "\n");                                  /* blank */
+	fprintf(fp, "not json at all\n");
+	fprintf(fp, "{\"h\":\"tooshort\",\"m\":\"minilm\",\"v\":\"AAAA\"}\n");
+	fprintf(fp, "{\"m\":\"minilm\",\"v\":\"AAAA\"}\n");       /* no hash */
+	fprintf(fp, "{\"h\":\"%064d\",\"m\":\"minilm\"}\n", 0);   /* no vector */
+	fprintf(fp, "{\"h\":\"zzzz%060d\",\"m\":\"minilm\",\"v\":\"AAAA\"}\n", 0);
+	fclose(fp);
+
+	c = sigil_veccache_open(PATH, "minilm", DIM);
+	ok(c != NULL, "malformed lines do not prevent opening");
+	eqsz(sigil_veccache_count(c), 1, "only the valid entry is loaded");
+	sigil_veccache_close(c);
+}
+
+static void
+test_short_vector_is_rejected(void)
+{
+	sigil_veccache_t *c;
+	FILE *fp;
+
+	/* A full-length hash with a vector that decodes to fewer bytes than
+	 * dim requires: exactly what a crash mid-base64 leaves behind.
+	 *
+	 * Isolated from the other malformed cases on purpose. The earlier
+	 * test used a short hash as well, so the length guard rejected the
+	 * line first and removing the vector-length check changed nothing --
+	 * two mutants survived because one bad field masked the other.
+	 */
+	unlink(PATH);
+	fp = fopen(PATH, "w");
+	fprintf(fp, "{\"h\":\"%064d\",\"m\":\"minilm\",\"d\":8,\"v\":\"AAAA\"}\n", 1);
+	fclose(fp);
+
+	c = sigil_veccache_open(PATH, "minilm", DIM);
+	eqsz(sigil_veccache_count(c), 0,
+	     "a vector shorter than dim is rejected, not zero-padded");
+	sigil_veccache_close(c);
+}
+
+static void
+test_short_hash_is_rejected(void)
+{
+	sigil_veccache_t *c;
+	FILE *fp;
+	uint16_t v[DIM];
+	char b64[64];
+	size_t i, o = 0;
+	static const char B[] =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+	/* A hash of the wrong length with a vector of the *right* length, so
+	 * only the hash guard can reject it. */
+	for (i = 0; i < DIM; i++)
+		v[i] = 0;
+	{
+		const uint8_t *in = (const uint8_t *)v;
+		size_t n = sizeof v;
+
+		for (i = 0; i + 2 < n; i += 3) {
+			uint32_t t = ((uint32_t)in[i] << 16) |
+			             ((uint32_t)in[i + 1] << 8) | in[i + 2];
+
+			b64[o++] = B[(t >> 18) & 63];
+			b64[o++] = B[(t >> 12) & 63];
+			b64[o++] = B[(t >> 6) & 63];
+			b64[o++] = B[t & 63];
+		}
+		b64[o] = '\0';
+	}
+
+	unlink(PATH);
+	fp = fopen(PATH, "w");
+	fprintf(fp, "{\"h\":\"abcd\",\"m\":\"minilm\",\"d\":8,\"v\":\"%s\"}\n",
+	        b64);
+	fclose(fp);
+
+	c = sigil_veccache_open(PATH, "minilm", DIM);
+	eqsz(sigil_veccache_count(c), 0,
+	     "a hash of the wrong length is rejected");
+	sigil_veccache_close(c);
+}
+
+static void
+test_uppercase_hex_is_read(void)
+{
+	sigil_veccache_t *c;
+	FILE *fp;
+	uint8_t h[32];
+	float in[DIM], out[DIM];
+	char hex[65];
+	int i;
+
+	/* This code writes lowercase, but a file concatenated from another
+	 * tool may not be, and rejecting it would silently drop entries. */
+	unlink(PATH);
+	fill(h, 51);
+	vec_of(in, 2.0f);
+	c = sigil_veccache_open(PATH, "minilm", DIM);
+	sigil_veccache_put(c, h, in);
+	sigil_veccache_close(c);
+
+	/* Re-read the line and upcase its hash field in place. */
+	{
+		char line[8192];
+		char *pos;
+
+		fp = fopen(PATH, "r");
+		if (fgets(line, sizeof line, fp) == NULL)
+			line[0] = '\0';
+		fclose(fp);
+		pos = strstr(line, "\"h\":\"");
+		if (pos != NULL) {
+			pos += 5;
+			for (i = 0; i < 64; i++)
+				if (pos[i] >= 'a' && pos[i] <= 'f')
+					pos[i] = (char)(pos[i] - 'a' + 'A');
+		}
+		fp = fopen(PATH, "w");
+		fputs(line, fp);
+		fclose(fp);
+	}
+	(void)hex;
+
+	c = sigil_veccache_open(PATH, "minilm", DIM);
+	eqsz(sigil_veccache_count(c), 1, "an uppercase hash is accepted");
+	ok(sigil_veccache_get(c, h, out) == 0, "and matches the same key");
+	sigil_veccache_close(c);
+}
+
+static void
+test_probing(void)
+{
+	sigil_veccache_t *c;
+	uint8_t h[32];
+	float in[DIM], out[DIM];
+	int i, found = 0;
+
+	/* Keys whose first eight bytes are identical land in the same bucket
+	 * and exercise the linear probe -- the path that distinguishes a
+	 * bucket choice from an identity decision. */
+	unlink(PATH);
+	c = sigil_veccache_open(PATH, "minilm", DIM);
+	for (i = 0; i < 16; i++) {
+		memset(h, 0, sizeof h);
+		h[31] = (uint8_t)i;              /* differ only in the last byte */
+		vec_of(in, (float)i);
+		sigil_veccache_put(c, h, in);
+	}
+	eqsz(sigil_veccache_count(c), 16, "colliding buckets all stored");
+
+	for (i = 0; i < 16; i++) {
+		memset(h, 0, sizeof h);
+		h[31] = (uint8_t)i;
+		vec_of(in, (float)i);
+		if (sigil_veccache_get(c, h, out) == 0 && close_enough(in, out))
+			found++;
+	}
+	eqsz((size_t)found, 16, "and each is found by its full hash");
+	sigil_veccache_close(c);
+}
+
 /* --- reporting ---------------------------------------------------------- */
 
 static void
@@ -320,6 +609,15 @@ main(void)
 	test_duplicate_keeps_the_first();
 	test_stats();
 	test_float16_range();
+	test_sync();
+	test_null_arguments();
+	test_unwritable_path();
+	test_odd_floats();
+	test_malformed_lines();
+	test_short_vector_is_rejected();
+	test_short_hash_is_rejected();
+	test_uppercase_hex_is_read();
+	test_probing();
 	unlink(PATH);
 
 	if (failures == 0) {

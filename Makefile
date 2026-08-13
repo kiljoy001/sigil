@@ -214,6 +214,16 @@ test/fuzz_sigil: test/fuzz_sigil.c
 		src/scan_scalar.c src/scan_x86.c src/scan_sse.c src/scan_neon.c \
 		src/scan_generic.c src/scan_range.c src/simhash.c src/split.c -o $@
 
+# The cache loader parses a file it did not necessarily write: a crash
+# leaves a partial line, and recovery is the worst moment for an
+# out-of-bounds read.
+test/fuzz_veccache: test/fuzz_veccache.c src/veccache.c
+	$(FUZZCC) -O1 -g -fsanitize=fuzzer,address,undefined -Iinclude \
+		$< src/veccache.c -o $@
+
+fuzz-veccache: test/fuzz_veccache
+	./test/fuzz_veccache -max_total_time=$(FUZZTIME) test/fuzz-corpus-vc
+
 fuzz: test/fuzz_sigil
 	@mkdir -p test/fuzz-corpus
 	./test/fuzz_sigil -max_total_time=$(FUZZTIME) test/fuzz-corpus

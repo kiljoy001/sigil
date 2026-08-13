@@ -28,6 +28,7 @@
 #include "sigil.h"
 #include "sigil_embed.h"
 #include "sigil_utf8.h"
+#include "sigil_split.h"
 
 static int checks, failures;
 
@@ -587,6 +588,89 @@ test_utf8_seq(void)
 	   "buffer with a stray cp1252 byte reports invalid");
 }
 
+/* --- paragraph splitting ------------------------------------------------ */
+
+/*
+ * The splitter defines the unit of identity: a record's BLAKE3 is computed
+ * over exactly the span this produces. There is a larger suite in Python
+ * (tools/tests/test_split.py) that drives the same C through ctypes, but
+ * CRAP found this at 0% line coverage and CRAP 600 -- the C build never
+ * ran it, and the C build is what ships. The same signature utf8_repair.c
+ * had for the same reason.
+ */
+struct splitcount {
+	int n;
+	size_t total;
+	unsigned last_para;
+};
+
+static void
+countchunk(const sigil_chunk_t *c, void *arg)
+{
+	struct splitcount *s = arg;
+
+	s->n++;
+	s->total += c->len;
+	s->last_para = c->para;
+}
+
+static void
+test_split(void)
+{
+	struct splitcount sc;
+	char buf[9000];
+	const char *two = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	                  "\n\n"
+	                  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+	eqsz(sigil_split_count("", 0), 0, "empty input yields nothing");
+	eqsz(sigil_split_count(NULL, 0), 0, "a null buffer is safe");
+
+	/* Minpara and Maxpara are inclusive at both ends. */
+	memset(buf, 'a', sizeof buf);
+	eqsz(sigil_split_count(buf, SIGIL_MINPARA), 1, "exactly Minpara kept");
+	eqsz(sigil_split_count(buf, SIGIL_MINPARA - 1), 0,
+	     "one below Minpara dropped");
+	eqsz(sigil_split_count(buf, SIGIL_MAXPARA), 1,
+	     "exactly Maxpara is one chunk");
+
+	/* A remainder below Minpara is dropped, not counted: this is the
+	 * half of the corpus disagreement that made the manifest overcount. */
+	eqsz(sigil_split_count(buf, SIGIL_MAXPARA + 1), 1,
+	     "a one-byte remainder is dropped, not a second chunk");
+	eqsz(sigil_split_count(buf, SIGIL_MAXPARA + SIGIL_MINPARA), 2,
+	     "a remainder at Minpara is kept");
+
+	/* Both paragraph terminators. The Python reimplementation knew only
+	 * "\n\n" and merged these into one. */
+	eqsz(sigil_split_count(two, strlen(two)), 2, "\\n\\n ends a paragraph");
+	{
+		char crlf[128];
+
+		snprintf(crlf, sizeof crlf, "%.48s\n\r%.48s", two, two + 50);
+		eqsz(sigil_split_count(crlf, strlen(crlf)), 2,
+		     "\\n\\r also ends a paragraph");
+	}
+
+	/* The callback sees offsets into the caller's buffer, and paragraph
+	 * numbers count from one. */
+	sc.n = 0; sc.total = 0; sc.last_para = 0;
+	sigil_split(two, strlen(two), countchunk, &sc);
+	eqsz((size_t)sc.n, 2, "callback fires once per chunk");
+	eqsz((size_t)sc.last_para, 2, "paragraph numbers are 1-based");
+	ok(sc.total < strlen(two), "the separator is not part of any chunk");
+
+	/* Leading whitespace is skipped before the span is measured. */
+	{
+		char lead[128];
+
+		snprintf(lead, sizeof lead, "   \n\n%.60s", two);
+		sc.n = 0; sc.total = 0;
+		sigil_split(lead, strlen(lead), countchunk, &sc);
+		eqsz((size_t)sc.n, 1, "leading whitespace yields no chunk");
+	}
+}
+
 int
 main(void)
 {
@@ -603,6 +687,7 @@ main(void)
 	test_simd_selection();
 	test_utf8_repair();
 	test_utf8_seq();
+	test_split();
 
 	if (failures == 0) {
 		printf("PASS: %d checks\n", checks);
