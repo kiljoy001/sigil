@@ -1494,6 +1494,97 @@ not yet reported upstream.
 
 ---
 
+## Committing 74.9M records needs 54 GB to write 12 GB
+
+The first full-corpus run embedded **74,905,358 paragraphs across all 79,133
+books** in about 13 hours. Then `commit` ran for five more hours, reached
+**54 GB resident**, and had still written zero bytes when the machine was
+rebooted. Every record was lost.
+
+Nothing was wrong. That is the shape of the code:
+
+```c
+t = tab_create(...);
+for (i = 0; i < n; i++) {          /* 74.9M iterations */
+    r = tab_add_row(t, "path", p);  /* row held live */
+    tab_set(t, r, "para", buf);     /* six cells, each a string */
+    ...
+}
+tab_commit(t);                      /* only here does anything reach disk */
+```
+
+Peak memory is every row, its six cell strings, and the bucket index —
+roughly 4.5x the file it produces — and it scales with corpus size, so the
+machine's RAM sets the corpus ceiling.
+
+### What the measurements ruled out
+
+The instinct is to blame swap or I/O. Both were wrong, and `/proc` counters
+settled it in a way `iotop` could not — it stalled on launch, `gdb` could
+not attach because ptrace is restricted, and the process was unresponsive
+to `/stats` because sigilfs serves one client at a time.
+
+| reading | value | conclusion |
+|---|---|---|
+| `stat` utime+stime, 60 s apart | +92,322 ticks | computing hard, not stuck |
+| `vmstat` pswpin/pswpout, 60 s apart | +1 page, +0 | no paging at all |
+| `io` write_bytes | 0 after 5 h | never reached serialisation |
+| `io` rchar, two samples | identical | corpus reading long finished |
+| `MemAvailable` | 18.6 GB, falling ~30 MB/min | allocating steadily |
+
+So: purely allocator-bound. Two reads of a `/proc` file a minute apart
+distinguished "working" from "hung" and "swapping" from "not" when none of
+the usual tools would run.
+
+### The insert rate is linear; the memory is not
+
+libtab's bucket-growth fix (above) holds at this scale — measured over a
+16x range on a quiet machine:
+
+| rows | time | rate |
+|---|---|---|
+| 50,000 | 0.7 s | 67,142/s |
+| 200,000 | 3.0 s | 66,496/s |
+| 800,000 | 12.3 s | 65,124/s |
+
+Linear. The O(n²) commit that would have made this impossible is genuinely
+gone. What remains is that the rate collapses at 74.9M rows anyway, because
+each row holds ~700 bytes live and the allocator is working against 54 GB
+of residency. A benchmark on small tables does not predict that, and my
+19-minute estimate from those numbers was wrong by hours.
+
+### The fix: stream the write, keep only hashes
+
+Flush each row's bytes once it is finalised and free its cell strings,
+retaining only a hash of the key for deduplication:
+
+- 74.9M x 16 B (128-bit hash) ≈ **1.2 GB** of index
+- versus 54 GB today, for the same ~12 GB of output
+
+A 128-bit hash rather than 64-bit because at 74.9M keys the birthday bound
+gives a ~0.02% chance of at least one 64-bit collision, and today's dedup
+is exact. 1.2 GB is still nothing against 54.
+
+Streaming is only about *when bytes reach disk*. It need not change the
+in-memory API: a row can still be revised through `tab_set` until the
+caller moves to the next one, which is the only revision any bulk writer
+performs. The two costs that do remain are that a row already flushed
+cannot be revised, and that a failure mid-write leaves a partial file
+unless it writes to a temp path and renames at commit.
+
+Filed as libtab#2. It is additive — py-libtab and go-libtab are unaffected
+until someone binds it.
+
+### Why this only appeared now
+
+The manifest exercise wrote 77,883 rows in 4.9 s and round-tripped
+perfectly. The pipeline tests use 331 files. Nothing below a few million
+rows shows this at all: the peak is invisible when the table fits
+comfortably, and the ratio only becomes fatal when it does not. Running the
+real corpus is the only thing that would have found it.
+
+---
+
 ## Machines
 
 | name | CPU | SIMD | accelerator |
