@@ -27,7 +27,6 @@ from hypothesis import strategies as st
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.manifest import COLUMNS, Manifest, book_row
-from tools.metadata import ndb_sanitise
 
 libtab = pytest.importorskip("libtab", reason="libtab not installed")
 
@@ -121,17 +120,36 @@ class TestManifestRoundTrip:
 
         assert Manifest.read(p)["1"]["title"] == META["title"]
 
-    def test_quotes_inside_a_title_become_typographic(self, tmp_path):
-        """1,066 catalogue titles contain an ASCII quote and ndb cannot
-        represent one, so they are substituted rather than dropped. The
-        title stays readable and the file stays parseable."""
+    def test_quotes_inside_a_title_are_kept(self, tmp_path):
+        """1,066 catalogue titles contain an ASCII quote.
+
+        These used to be substituted with typographic quotes, because ndb
+        had no escape for the ASCII one and a title containing it wrote a
+        file that could not be reopened. libtab encodes values now, so the
+        title is stored as written -- and applying the old substitution
+        today would corrupt it.
+        """
         meta = dict(META, title='The "Genius"')
         p = tmp_path / "m.tab"
         with Manifest(p) as m:
             m.add(book_row("1", digest="d", path="p", encoding="ascii",
                            nbytes=1, nparas=1, meta=meta))
 
-        assert Manifest.read(p)["1"]["title"] == "The \u201cGenius\u201d"
+        assert Manifest.read(p)["1"]["title"] == 'The "Genius"'
+
+    def test_reserved_characters_are_kept(self, tmp_path):
+        """Everything ndb once could not carry, now stored verbatim."""
+        for name, value in (("leading hash", "#1 Bestseller"),
+                            ("literal nil", "nil"),
+                            ("newline", "line one\nline two"),
+                            ("tab", "a\tb"),
+                            ("control char", "a\x1fb")):
+            p = tmp_path / f"{abs(hash(name))}.tab"
+            meta = dict(META, title=value)
+            with Manifest(p) as m:
+                m.add(book_row("1", digest="d", path="p", encoding="ascii",
+                               nbytes=1, nparas=1, meta=meta))
+            assert Manifest.read(p)["1"]["title"] == value, name
 
     def test_non_latin_title(self, tmp_path):
         meta = dict(META, title="羅生門", authors="芥川龍之介")
@@ -218,7 +236,9 @@ class TestSearch:
 # Catalogue text: anything a cataloguer might type, including the
 # characters that break ndb.
 catalogue_text = st.text(
-    alphabet=st.characters(blacklist_categories=("Cs",)), max_size=120)
+    alphabet=st.characters(blacklist_categories=("Cs",),
+                           blacklist_characters="\x00"),
+    max_size=120)
 
 
 @settings(max_examples=200, deadline=None)
@@ -236,9 +256,11 @@ def test_any_catalogue_value_round_trips(tmp_path_factory, title, authors,
         m.add(book_row("1", digest="d", path="p", encoding="ascii",
                        nbytes=1, nparas=1, meta=meta))
 
-    # Modulo the substitutions ndb forces; ndb_sanitise is the definition
-    # of those, imported rather than restated so the two cannot drift.
+    # Verbatim now: libtab encodes on write and decodes on read. The one
+    # exception is NUL, which terminates the string at the C boundary and
+    # no encoding inside libtab can carry -- so the generator excludes it
+    # rather than the assertion tolerating it.
     got = Manifest.read(p)["1"]
-    assert got["title"] == ndb_sanitise(title)
-    assert got["authors"] == ndb_sanitise(authors)
-    assert got["subjects"] == ndb_sanitise(subjects)
+    assert got["title"] == title
+    assert got["authors"] == authors
+    assert got["subjects"] == subjects

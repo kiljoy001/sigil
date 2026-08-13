@@ -174,52 +174,8 @@ MUTANTS = [
         "",
     ),
 
-    # --- tools/metadata.py: ndb quoting --------------------------------
-    #
-    # The worst failure mode available: libtab accepts the value, writes
-    # the file, and something later cannot open it.
-    (
-        "quote: forget the leading-# case",
-        "tools/metadata.py",
-        'if s == "" or s.startswith("#") or " " in s:',
-        'if s == "" or " " in s:',
-    ),
-    (
-        "quote: forget empty values",
-        "tools/metadata.py",
-        'if s == "" or s.startswith("#") or " " in s:',
-        'if s.startswith("#") or " " in s:',
-    ),
-    (
-        "quote: forget values containing a space",
-        "tools/metadata.py",
-        'if s == "" or s.startswith("#") or " " in s:',
-        'if s == "" or s.startswith("#"):',
-    ),
-    (
-        "sanitise: leave the ASCII quote in place",
-        "tools/metadata.py",
-        r'                out.append("\u201c" if opening else "\u201d")',
-        "                out.append(c)",
-    ),
-    (
-        "sanitise: always use the closing quote",
-        "tools/metadata.py",
-        '                opening = i == 0 or s[i - 1].isspace() or s[i - 1] in "([{"',
-        '                opening = False',
-    ),
-    (
-        "sanitise: leave control characters in place",
-        "tools/metadata.py",
-        '    s = "".join(" " if ord(c) < 0x20 or ord(c) == 0x7F else c for c in s)',
-        "    pass",
-    ),
-    (
-        "sanitise: delete control characters instead of spacing them",
-        "tools/metadata.py",
-        '    s = "".join(" " if ord(c) < 0x20 or ord(c) == 0x7F else c for c in s)',
-        '    s = "".join(c for c in s if ord(c) >= 0x20 and ord(c) != 0x7F)',
-    ),
+    # The ndb-quoting mutants were removed with the functions. libtab
+    # encodes values itself now, and the manifest stores them verbatim.
 
     # --- tools/metadata.py: the ground-truth fields --------------------
     #
@@ -266,18 +222,13 @@ MUTANTS = [
         '        row[f] = (meta or {}).get(f, "") or ""',
         '        row[f] = meta[f]',
     ),
-    (
-        "manifest: skip quoting on write",
-        "tools/manifest.py",
-        '            self._tab.set(r, col, ndb_quote(row.get(col, "")))',
-        '            self._tab.set(r, col, row.get(col, ""))',
-    ),
-    (
-        "manifest: drop the nil-sentinel substitution",
-        "tools/metadata.py",
-        '    if s == "nil":\n        s = "nil\\u2009"\n',
-        "",
-    ),
+    # No mutant for the per-column write: book_row() fills every column
+    # and the row is now indexed rather than .get()'d, so there is no
+    # default to mutate. A missing column raises, which is what a caller
+    # bug should do.
+    # The nil-sentinel mutant went with the substitution it tested:
+    # libtab distinguishes semantic nil from the literal string "nil"
+    # now, so nothing needs substituting.
     # No "forget to commit" mutant: libtab's close() flushes, verified at
     # 5,000 rows, so dropping the commit() changes nothing observable. It
     # is an equivalent mutation, not a gap -- recorded here so nobody adds

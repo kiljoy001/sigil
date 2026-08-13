@@ -33,15 +33,22 @@ facet-shaped -- locc, language, death_year, subjects -- so a Solr view can
 be built from this file later without changing the schema. That view would
 be a consumer of the manifest, not a replacement for it.
 
-The quoting hazard
-------------------
+Values are written verbatim
+---------------------------
 
-libtab's Tabula.set() does not quote values, and an unquoted space does
-not fail at write time. The file is written, and something later fails
-with "row 0 has undeclared column from", naming a word from the middle of
-a title. Every title, author and subject line in this corpus contains
-spaces, so every value goes through metadata.ndb_quote() on the way in and
-is unquoted on the way out.
+libtab encodes on write and decodes on read, so a title keeps its spaces,
+its quotation marks and a leading '#', and the literal string "nil" stays
+distinct from an absent value.
+
+That was not always true. This file used to substitute the characters ndb
+could not carry -- ASCII quotes became typographic ones, control
+characters became spaces, and "nil" gained a thin space. Each was correct
+for the library as it stood and is wrong now: applying them today would
+corrupt values libtab stores correctly, so the helpers were deleted rather
+than left available to call.
+
+The one value still lost is NUL, which terminates the string at the C
+boundary. Nothing inside libtab can carry it.
 """
 
 import sys
@@ -55,8 +62,6 @@ from pathlib import Path
 # imports below would fail; this makes both work.
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from tools.metadata import ndb_quote
 
 SCHEMA = "gutenberg-books"
 
@@ -98,15 +103,6 @@ def book_row(book, *, digest, path, encoding, nbytes, nparas, meta):
     return row
 
 
-def _unquote(value):
-    """Reverse ndb_quote. libtab returns the token as stored."""
-    if value is None:
-        return ""
-    if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
-        return value[1:-1].replace('""', '"')
-    return value
-
-
 class Manifest:
     """Writer. Use as a context manager so the table is always closed.
 
@@ -126,9 +122,13 @@ class Manifest:
         self._tab = libtab.Tabula.create(str(self.path), SCHEMA, cols)
 
     def add(self, row):
-        r = self._tab.add_row("book", ndb_quote(row["book"]))
+        # book_row() fills every column, and test_every_column_is_present
+        # enforces that, so indexing rather than .get() is deliberate: a
+        # missing column is a bug in the caller and should raise here
+        # instead of writing a plausible empty cell.
+        r = self._tab.add_row("book", row["book"])
         for col in COLUMNS[1:]:
-            self._tab.set(r, col, ndb_quote(row.get(col, "")))
+            self._tab.set(r, col, row[col])
 
     def close(self):
         self._tab.commit()
@@ -151,7 +151,8 @@ class Manifest:
         try:
             out = {}
             for r in tab.iter_rows():
-                row = {c: _unquote(tab.get(r, c)) for c in COLUMNS}
+                # libtab decodes on read; an absent cell is None.
+                row = {c: (tab.get(r, c) or "") for c in COLUMNS}
                 out[row["book"]] = row
             return out
         finally:
