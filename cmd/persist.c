@@ -141,9 +141,8 @@ char *
 store_commit(Sigilfs *f)
 {
 	TabColSpec cols[6];
-	Tab *t;
-	TabRow *r;
-	char buf[64], hex[160], bitsbuf[16], seedbuf[32];
+	TabWriter *w;
+	char buf[64], hex[160];
 	long i, n;
 
 	if(f->storepath == nil)
@@ -164,16 +163,25 @@ store_commit(Sigilfs *f)
 	cols[4].name = "off";
 	cols[5].name = "len";
 
-	if((t = tab_create(f->storepath, "sigil", cols, 6)) == nil)
+	/* The streaming writer, not tab_create: the in-memory path
+	 * materialises the whole table before writing a byte, which at 74.9M
+	 * records meant 54 GB resident to produce a 12 GB file -- a commit
+	 * that never finished and took every record with it when the machine
+	 * was rebooted. The writer streams each row out as it is finalized
+	 * and keeps only a dedup hash set, measured flat at ~55 MB per
+	 * million rows. Rows land in a temp file and the store is renamed
+	 * into place at commit, so a crash mid-write leaves the previous
+	 * store intact rather than half a new one. */
+	if((w = tab_writer_create(f->storepath, "sigil", cols, 6)) == nil)
 		return (char*)tab_lasterror();
 
 	/* Parameter row first, so a reader hits it before any data. */
-	if((r = tab_add_row(t, "path", Paramrow)) != nil){
+	if(tab_writer_add_row(w, "path", Paramrow) == 0){
 		snprint(buf, sizeof buf, "%d", f->lsh_bits);
-		tab_set(t, r, "para", buf);
-		tab_set(t, r, "hash", f->model_id);
+		tab_writer_set(w, "para", buf);
+		tab_writer_set(w, "hash", f->model_id);
 		snprint(buf, sizeof buf, "%llux", f->simhash_seed);
-		tab_set(t, r, "lsh", buf);
+		tab_writer_set(w, "lsh", buf);
 	}
 
 	n = br_count(f->store);
@@ -182,25 +190,25 @@ store_commit(Sigilfs *f)
 
 		if(p == nil)
 			continue;
-		if((r = tab_add_row(t, "path", (char*)p)) == nil)
+		if(tab_writer_add_row(w, "path", (char*)p) < 0)
 			continue;
 		snprint(buf, sizeof buf, "%ud", br_para(f->store, i));
-		tab_set(t, r, "para", buf);
+		tab_writer_set(w, "para", buf);
 		snprint(buf, sizeof buf, "%lud", br_offset(f->store, i));
-		tab_set(t, r, "off", buf);
+		tab_writer_set(w, "off", buf);
 		snprint(buf, sizeof buf, "%lud", br_length(f->store, i));
-		tab_set(t, r, "len", buf);
+		tab_writer_set(w, "len", buf);
 		if(br_hash(f->store, i, hex, sizeof hex) == 0)
-			tab_set(t, r, "hash", hex);
+			tab_writer_set(w, "hash", hex);
 		if(br_lsh_hex(f->store, i, hex, sizeof hex) == 0)
-			tab_set(t, r, "lsh", hex);
+			tab_writer_set(w, "lsh", hex);
 	}
 
-	if(tab_commit(t) < 0){
+	if(tab_writer_commit(w) < 0){
 		char *e = (char*)tab_lasterror();
-		tab_close(t);
+		tab_writer_close(w);
 		return e;
 	}
-	tab_close(t);
+	tab_writer_close(w);
 	return nil;
 }

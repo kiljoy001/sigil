@@ -6,7 +6,10 @@
 # Default to the source tree, not /usr/local/plan9: the installed copy may be
 # older and lack the lib9p 64-bit wstat fix. See docs/PLAN9PORT-BUG.md.
 PLAN9      ?= $(HOME)/Repo/plan9port
-LIBTAB_SRC ?= $(HOME)/Repo/objective-9c/libtab
+# The canonical libtab checkout, not a vendored snapshot. This used to
+# point at objective-9c/libtab, which was a stale copy: it predated the
+# text-encoding fix and the streaming writer this code now depends on.
+LIBTAB_SRC ?= $(HOME)/Repo/libtab
 MONOCYPHER ?= $(HOME)/Repo/objective-9c
 
 CC9 = $(PLAN9)/bin/9c

@@ -102,7 +102,10 @@ CORPUS ?= test/data/corpus.txt
 # The source tree rather than /usr/local/plan9: the installed copy may predate
 # the lib9p 64-bit wstat fix. See docs/PLAN9PORT-BUG.md.
 PLAN9 ?= $(HOME)/Repo/plan9port
-LIBTAB_SRC ?= $(HOME)/Repo/objective-9c/libtab
+# The canonical libtab checkout, not a vendored snapshot. This used to
+# point at objective-9c/libtab, which was a stale copy: it predated the
+# text-encoding fix and the streaming writer this code now depends on.
+LIBTAB_SRC ?= $(HOME)/Repo/libtab
 
 .PHONY: all check check-semantic eval corpus bench bench-mt clean sbom sigilfs prop sanitize fuzz mutate oom
 
@@ -139,12 +142,16 @@ test/eval: test/eval.c $(LIB)
 test/veccache: test/veccache.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< $(LIB) $(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS) -lstdc++
 
-check: test/differential test/unit test/bridge test/oom test/veccache
+check: test/differential test/unit test/bridge test/oom test/veccache cmd/sigilfs
 	./test/differential
 	./test/unit
 	./test/bridge
 	./test/oom
 	./test/veccache
+	sh test/store.sh
+
+cmd/sigilfs:
+	$(MAKE) -C cmd
 
 THEFT ?= $(HOME)/Repo/libtab/tests/vendor/theft
 
@@ -183,9 +190,12 @@ oom: test/oom
 # ASan + UBSan over both suites. libsigil only: OpenVINO dlopens TBB with
 # RTLD_DEEPBIND, which the sanitizer runtime refuses, and the logic worth
 # checking is all on this side of that boundary anyway.
-SANSRC = $(BLAKE3) src/sigil.c src/trit.c src/store.c src/scan_scalar.c \
-         src/scan_x86.c src/scan_sse.c src/scan_neon.c src/scan_generic.c \
-         src/scan_range.c src/simhash.c src/embed_llama.c
+# Derived from SRC, never a second copy of it. As a hand-maintained list
+# this silently fell behind three times -- utf8_repair.c, split.c and
+# veccache.c each joined the library and the unit suite without being
+# added here, and the target had been failing to link since. A sanitizer
+# run that does not build is a sanitizer run nobody is doing.
+SANSRC = $(SRC)
 SANFLAGS = -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
            -Iinclude -Ithird_party/blake3 -DBLAKE3_NO_AVX512 -DBLAKE3_NO_AVX2 \
            -DBLAKE3_NO_SSE41 -DBLAKE3_NO_SSE2 -DBLAKE3_USE_NEON=0

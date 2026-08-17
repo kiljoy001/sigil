@@ -56,7 +56,17 @@ def suite_passes(path):
     """A C mutant needs a rebuild before the suite can see it. A build
     failure counts as caught -- the compiler refusing the mutation is a
     detection, just an early one."""
-    if path.startswith(("src/", "cmd/")):
+    if path.startswith("cmd/"):
+        # cmd/ is the 9P server, built by its own makefile and linked
+        # against libtab -- none of the libsigil test binaries include
+        # it. The three persist.c mutants all survived on their first
+        # run for exactly this reason: the mutation applied, nothing
+        # recompiled sigilfs, and the untouched binary passed. Only
+        # test/store.sh drives persist.c, and only through a live
+        # server, so it is the whole detector for this directory.
+        return (run("make -s -C cmd")
+                and run("sh test/store.sh"))
+    if path.startswith("src/"):
         # Every C test binary, not just unit: veccache.c is covered by
         # test/veccache, and building only test/unit meant six mutants
         # "survived" because nothing that could catch them ever ran.
@@ -99,10 +109,13 @@ for name, path, old, new in MUTANTS:
     finally:
         Path(path).write_text(src)
 
-# The C mutants rebuilt libsigil; leave the tree as we found it.
+# The C mutants rebuilt libsigil and sigilfs; leave the tree as we found
+# it. Restoring the source is not enough -- a mutated cmd/sigilfs left on
+# disk would be run by the next `make check`.
 run("make -s libsigil.a")
 run("make -s test/unit")
 run("make -s test/veccache")
+run("make -s -C cmd")
 
 print(f"\ncaught {caught}, survived {survived}, broken {broken}")
 if survived:

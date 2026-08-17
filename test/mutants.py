@@ -355,4 +355,29 @@ MUTANTS = [
     # returns -1 -- so the line is rejected either way. The guard is a
     # cheap early exit, not the thing enforcing correctness. Recorded so
     # nobody adds it back expecting a kill.
+
+    # --- cmd/persist.c: the streaming commit ---------------------------
+    # Ported from tab_create (whole table in memory, 54 GB at 74.9M rows,
+    # never finished) to libtab's TabWriter. 269 checks were green while
+    # this function was broken in a working tree once already, because
+    # nothing drove persist.c through the server; test/store.sh is the
+    # test these mutants lean on, and cmd/ mutants rebuild sigilfs.
+    (
+        "persist: params row never written",
+        "cmd/persist.c",
+        '\tif(tab_writer_add_row(w, "path", Paramrow) == 0){',
+        '\tif(tab_writer_add_row(w, "path", Paramrow) != 0){',
+    ),
+    (
+        "persist: no data rows, only params",
+        "cmd/persist.c",
+        "\tn = br_count(f->store);\n\tfor(i = 0; i < n; i++){",
+        "\tn = br_count(f->store);\n\tfor(i = n; i < n; i++){",
+    ),
+    (
+        "persist: commit never publishes the temp file",
+        "cmd/persist.c",
+        "\tif(tab_writer_commit(w) < 0){",
+        "\tif(0 && tab_writer_commit(w) < 0){",
+    ),
 ]
