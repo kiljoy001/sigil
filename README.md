@@ -22,6 +22,10 @@ are O(1).
 [60..64)  cluster ref
 ```
 
+A second, wider representation can live beside the store in a *sidecar* — a
+sparse mapped file of `(index, vector)` pairs — so a query can reorder the
+scan's shortlist without the record growing past 64 bytes.
+
 A `_Static_assert` pins the size, and it has already caught one silent padding
 change: an earlier layout with a 20-byte SHA-1 needed the LSH array first, because
 putting the hash first forced four bytes of interior padding and pushed the record to
@@ -172,6 +176,72 @@ contradictory statements scored consistently **more** similar than equivalent on
 is substantially bag-of-tokens — correlation between token overlap and cosine is
 +0.601 — so pairs that share vocabulary while asserting the opposite score as similar.
 Operator trees do not have that failure, and score 16/16 on the same probe.
+
+### The whole corpus, in 1.8 MB of memory
+
+The store is a list of fixed-size segments, and a segment never moves once
+allocated. That makes two things possible. Growth appends rather than
+reallocating, so it stops copying itself:
+
+| | before growth | after | transient |
+|---|---|---|---|
+| flat array | 297.5 MB | 601.5 MB | +304 MB, a second copy |
+| **segmented** | 450.8 MB | 514.9 MB | **+64 MB, one segment** |
+
+And a sealed segment can be a *mapping of a file* rather than heap, which a
+reallocating array could never be — every doubling invalidated every address.
+Opening a mapped store costs no parsing, no allocation and no copy: the
+field arrays are pointers into the file.
+
+The full corpus is 59,618,093 paragraphs, built from the 31 GB CSV in 110 s
+at 543,753 rec/s into a 3.6 GB file:
+
+| | resident | scan | open |
+|---|---|---|---|
+| heap, 20M records | 1222.6 MB | 25 ms | 42 ms |
+| **mapped, 59.6M records** | **1.8 MB** | 68 ms | **0.01 ms** |
+| mapped, cold page cache | 1.8 MB | 281 ms | 0.01 ms |
+
+Resident memory no longer tracks corpus size. The cold row is reported
+because it is the honest one: mmap removes the copy and the RAM ceiling, not
+the read, so a first query after a restart is storage-bound at 3.17 GB/s
+against 13.0 warm.
+
+`wc -l` reports 68,027,639 lines for that CSV against 59,618,093 records,
+and the gap is real rather than lost work: 8,185,964 rows carry embedded
+newlines inside quoted fields. Parsing goes through libcsv for that reason —
+a split on commas would not have failed on those rows, it would have
+mis-fielded them.
+
+### Reranking the shortlist: 10x R@1 for 0.12 ms
+
+The scan compares 128-bit codes, which is fast and lossy. The float vectors
+are accurate and far too slow to compare against everything. So the cheap
+thing narrows and the expensive thing orders. 200,064 paragraphs, 1,191
+queries, ground truth same-book:
+
+| method | R@1 | R@5 | R@10 | R@20 | ms/query |
+|---|---|---|---|---|---|
+| scan alone | 0.0059 | 0.0084 | 0.0168 | 0.0285 | 0.33 |
+| **scan + rerank** | **0.0605** | **0.1092** | **0.1360** | **0.1553** | **0.45** |
+
+The float work is 0.12 ms because stage one already reduced the corpus to a
+shortlist. Vectors live in a *sidecar* — a separate mapped file of
+`(index, vector)` pairs, sparse and sorted — rather than in the record,
+which is a fixed 64 bytes with a `_Static_assert` on it.
+
+Asymmetric distance was measured against the same data and lost: keeping the
+query as floats against stored bits reaches 0.0411 R@1 with no extra storage
+at all, but that is half of rerank's gain at seven times the cost. It is the
+right answer when the vectors will not fit. Here they map.
+
+The idea this displaced was a second, larger embedding model over the middle
+of the distance distribution. Two measurements say there is nothing there:
+same-book rate at the median distance of 60 bits is **0.58x chance**, and
+re-embedding those pairs under a 768-dimension model finds cosine separation
+of −0.007. The bulk at 60 is the geometry of "unrelated", not hidden signal
+— which is also evidence the LSH is working. See
+[`docs/FINDINGS.md`](docs/FINDINGS.md).
 
 ### Scan throughput
 
@@ -348,11 +418,14 @@ Upstream master still carries it; diagnosis and fix in
 
 ```sh
 make                 # libsigil.a
-make check           # differential tests, scalar vs SIMD
+make check           # differential, unit, bridge, oom, segments, mapped, sidecar
 make check-semantic  # proves the LSH bits carry meaning
 make eval            # retrieval quality on a standard corpus
 make bench           # single-threaded throughput
 make bench-mt        # threaded, static split vs work pool
+make segments        # growth appends, never copies
+make mapped          # file-backed stores, and what they refuse
+make sidecar         # stage-two vectors and rerank
 make sbom            # SPDX 2.3 SBOM
 ```
 
@@ -451,11 +524,12 @@ that cannot fail is decoration.
 ## Status
 
 Working end to end: the 64-byte layout, BLAKE3 identity, trit packing, the
-struct-of-arrays store, scan kernels in scalar/AVX2/SSE4.2/NEON/SYCL with
+segmented struct-of-arrays store, scan kernels in scalar/AVX2/SSE4.2/NEON/SYCL with
 differential tests, embedding via llama.cpp or OpenVINO, libtab persistence that
-refuses to open on a parameter mismatch, a directory indexer, and `/similar/<hex>/`
-served over 9P with paragraphs read back from their source. Builds and passes on
-x86-64 and aarch64.
+refuses to open on a parameter mismatch, file-backed stores that map the whole
+corpus in 1.8 MB, float rerank over a sidecar, a directory indexer, and
+`/similar/<hex>/` served over 9P with paragraphs read back from their source.
+Builds and passes on x86-64 and aarch64.
 
 Not built:
 
@@ -463,10 +537,13 @@ Not built:
   BLAKE3 makes "has this changed" a cheap comparison; it is simply not wired up.
 - **Classification in the namespace.** The two-pass classifier works in `tools/` and
   is measured, but nothing projects its themes into the filesystem yet.
-- **A full-corpus run.** In progress at the time of writing: 77,367,817 paragraphs
-  at ~1,900 records/s, about 11 hours on the Arc. Every retrieval number above is
-  still from a 20,000 paragraph sample. Embedding — not the 12 ms scan — is the
-  bottleneck by four orders of magnitude.
+- **A full-corpus semantic run.** The whole corpus builds and scans — 59,618,093
+  paragraphs, 110 s, 1.8 MB resident — but with the byte-shingle fallback rather
+  than embeddings, which measures the store and not retrieval. Embedding is the
+  bottleneck by four orders of magnitude, and the retrieval numbers above are from
+  a 200,064 paragraph sample. `tools/build_store -e` does the semantic build.
+- **Rerank in the namespace.** `sigil_side_rerank()` is measured and tested, but
+  `/similar/<hex>/` does not consult a sidecar yet.
 
 Four bugs were found only by running this, not by reading it, and all four are in
 the log rather than quietly fixed:

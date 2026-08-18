@@ -211,12 +211,123 @@ test_empty(void)
 	unlink("test-side-empty.side");
 }
 
+/* --- float payload and rerank ------------------------------------------- */
+
+#define VDIM 16
+#define NVEC 500
+
+/* Vector k points mostly along axis (k % VDIM), so nearest-by-cosine is
+ * predictable without depending on a model. */
+static void
+make_vec(float *v, size_t k)
+{
+	size_t d;
+
+	for (d = 0; d < VDIM; d++)
+		v[d] = (d == k % VDIM) ? 1.0f : 0.01f * (float)((k + d) % 7);
+}
+
+static void
+test_float_sidecar(void)
+{
+	sigil_store_t st;
+	sigil_side_t sd;
+	uint32_t *idx = malloc(NVEC * sizeof *idx);
+	float *vec = malloc(NVEC * VDIM * sizeof *vec);
+	size_t k, bad = 0;
+	const char *path = "test-side-vec.side";
+
+	build_store(&st);
+	for (k = 0; k < NVEC; k++) {
+		idx[k] = (uint32_t)(k * 2);        /* sparse: every other */
+		make_vec(vec + k * VDIM, k);
+	}
+
+	ok(sigil_side_save_vec(path, idx, vec, NVEC, VDIM, MODEL,
+	                       (uint64_t)st.count) == 0,
+	   "a float sidecar saves");
+	ok(sigil_side_map(&sd, path, &st, MODEL) == 0, "a float sidecar maps");
+	ok(sd.kind == SIGIL_SIDE_FLOAT, "the payload kind is recorded");
+	ok(sd.dim == VDIM, "the vector dimension survives");
+
+	for (k = 0; k < NVEC; k++) {
+		const float *v = sigil_side_vec(&sd, idx[k]);
+
+		if (v == NULL || memcmp(v, vec + k * VDIM,
+		                        VDIM * sizeof *vec) != 0)
+			bad++;
+	}
+	ok(bad == 0, "every vector reads back exactly");
+
+	/* Float bytes read as a bit pattern give a number, not an error, so
+	 * asking for the wrong payload must refuse rather than reinterpret. */
+	ok(sigil_side_lookup(&sd, idx[0]) == NULL,
+	   "a code lookup on a float sidecar returns NULL, not reinterpreted bits");
+
+	/* Cosine: a vector against itself is 1, and the sense is "higher is
+	 * nearer" -- the opposite of Hamming. */
+	{
+		const float *a = sigil_side_vec(&sd, idx[0]);
+		const float *b = sigil_side_vec(&sd, idx[1]);
+		double self = sigil_side_cosine(&sd, a, a);
+		double other = sigil_side_cosine(&sd, a, b);
+
+		ok(self > 0.999 && self < 1.001, "cosine with itself is 1");
+		ok(other < self, "a different vector scores lower");
+	}
+
+	/* Rerank: hand it a deliberately bad order and check the nearest
+	 * comes first. */
+	{
+		uint32_t cand[8];
+		float q[VDIM];
+		size_t n;
+
+		for (k = 0; k < 8; k++)
+			cand[k] = idx[7 - k];       /* reversed */
+		make_vec(q, 0);                     /* query == vector 0 */
+		n = sigil_side_rerank(&sd, q, cand, 8);
+		ok(n == 8, "rerank scored every candidate");
+		ok(cand[0] == idx[0],
+		   "rerank puts the nearest candidate first");
+	}
+
+	/*
+	 * A candidate the sidecar does not cover is a gap in stage two, not
+	 * evidence about the record: it must survive, after the reranked
+	 * ones, rather than being dropped.
+	 */
+	{
+		uint32_t cand[4];
+		float q[VDIM];
+		size_t n;
+
+		cand[0] = idx[5];
+		cand[1] = 1;              /* odd index: no sidecar entry */
+		cand[2] = idx[0];
+		cand[3] = 3;              /* likewise */
+		make_vec(q, 0);
+		n = sigil_side_rerank(&sd, q, cand, 4);
+		ok(n == 2, "rerank reports how many it could score");
+		ok(cand[0] == idx[0], "the scored nearest still leads");
+		ok((cand[2] == 1 && cand[3] == 3),
+		   "uncovered candidates are kept, after the scored ones");
+	}
+
+	sigil_side_unmap(&sd);
+	sigil_store_free(&st);
+	free(idx);
+	free(vec);
+	unlink(path);
+}
+
 int
 main(void)
 {
 	test_round_trip();
 	test_refusals();
 	test_empty();
+	test_float_sidecar();
 
 	unlink(PATH);
 

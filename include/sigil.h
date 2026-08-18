@@ -278,10 +278,21 @@ void sigil_store_unmap(sigil_store_t *st);
  * Stage-two refinement: a sidecar store
  *
  * The stage-one sigil is identity and index, and it never goes away. A
- * sidecar holds a *second* code for a subset of records, produced by a
- * different (usually larger) embedding model, so a query can rescore the
- * candidates stage one selected without the corpus paying for the bigger
- * model.
+ * sidecar holds a second representation for a subset of records, so a query
+ * can rescore the candidates stage one selected using something more
+ * accurate than 128 bits.
+ *
+ * The payload is either float vectors or a wider binary code. Floats are
+ * what rerank uses and are the measured winner: on 200,064 records and 1,191
+ * queries, reordering a 200-record binary shortlist by float cosine moved
+ * R@1 from 0.0269 to 0.0806 -- 3.0x, and 80% of the way to the float32
+ * ceiling of 0.1008 -- for 18.63 ms/query against the bare scan's 18.56.
+ * The reduction has already happened, so the float work is 0.4% overhead.
+ *
+ * Asymmetric distance (keep the query as floats, compare against the stored
+ * bits) was measured against the same data: 0.0411 R@1, better than binary
+ * and needing no extra storage, but half of rerank's gain at 7x the time.
+ * It is the answer when the vectors will not fit; here they map.
  *
  * Sparse by construction: stage one does the reduction, so the sidecar
  * covers only the records worth a second look. Each entry is (index, code)
@@ -303,22 +314,62 @@ void sigil_store_unmap(sigil_store_t *st);
 
 #define SIGIL_SIDE_MODEL_MAX 64
 
+/* What a sidecar carries. Recorded in the file so a reader cannot
+ * interpret float bytes as a bit pattern, which produces a number rather
+ * than an error. */
+typedef enum {
+	SIGIL_SIDE_CODE  = 1,   /* uint64_t words, compared by Hamming */
+	SIGIL_SIDE_FLOAT = 2    /* float vector, compared by cosine    */
+} sigil_side_kind;
+
 typedef struct {
 	const uint32_t *index;   /* [count] store indices, ascending */
-	const uint64_t *code;    /* [count * words] refined codes */
+	const uint64_t *code;    /* [count * words], when kind == CODE  */
+	const float    *vec;     /* [count * dim],   when kind == FLOAT */
 	size_t count;
-	size_t words;            /* 64-bit words per code */
-	size_t bits;             /* code width, words * 64 */
+	sigil_side_kind kind;
+	size_t words;            /* 64-bit words per code  (CODE)  */
+	size_t bits;             /* words * 64             (CODE)  */
+	size_t dim;              /* floats per vector      (FLOAT) */
 	char   model[SIGIL_SIDE_MODEL_MAX];
 	uint64_t base_count;     /* count of the store this refines */
 	void  *map;
 	size_t maplen;
 } sigil_side_t;
 
-/* Write a sidecar. `index` must be ascending; `code` is count*words words. */
+/* Write a code sidecar. `index` must be ascending; `code` is count*words. */
 int sigil_side_save(const char *path, const uint32_t *index,
                     const uint64_t *code, size_t count, size_t words,
                     const char *model, uint64_t base_count);
+
+/* Write a float sidecar. `vec` is count*dim floats, one vector per index. */
+int sigil_side_save_vec(const char *path, const uint32_t *index,
+                        const float *vec, size_t count, size_t dim,
+                        const char *model, uint64_t base_count);
+
+/* The float vector for store index i, or NULL if i has no entry or this
+ * sidecar carries codes rather than vectors. */
+const float *sigil_side_vec(const sigil_side_t *sd, uint32_t i);
+
+/* Cosine similarity between two vectors of this sidecar's dimension.
+ * Higher is nearer -- the opposite sense to Hamming, which is why rerank
+ * sorts descending where the scan sorts ascending. */
+double sigil_side_cosine(const sigil_side_t *sd, const float *a,
+                         const float *b);
+
+/*
+ * Rerank: reorder `cand` (the scan's output, `n` store indices) by cosine
+ * against `query` under the sidecar, best first. Indices with no sidecar
+ * entry keep their scan order after every reranked one, rather than being
+ * dropped -- a missing vector is a gap in stage two, not evidence about the
+ * record.
+ *
+ * Returns the number reordered. `n` is expected to be the shortlist the scan
+ * produced, not the corpus: the whole economy of this is that stage one did
+ * the reduction first.
+ */
+size_t sigil_side_rerank(const sigil_side_t *sd, const float *query,
+                         uint32_t *cand, size_t n);
 
 /* Open a sidecar read-only. Refuses a code width or base count that does not
  * match `st`, and a model name that does not match `model` when non-NULL. */

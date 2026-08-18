@@ -1679,6 +1679,145 @@ generator put there.
 
 ---
 
+## The store is a mapping now, and the scan reranks what it returns
+
+Two changes to the same problem: the corpus outgrew the machine, and the
+128-bit code was throwing away accuracy the embedding had already paid for.
+
+### Growth stopped copying, and the load stopped parsing
+
+The flat store doubled by allocating a second set of all seven field arrays,
+copying into it, and freeing the first -- both live at once, so the peak was
+old + new. Measured across the last doubling of an 8.4M record fill, virtual
+size went 297.5 MB to 601.5 MB. Segments removed the copy:
+
+| | before growth | after | transient |
+|---|---|---|---|
+| flat | 297.5 MB | 601.5 MB | **+304 MB, a full second copy** |
+| segmented | 450.8 MB | 514.9 MB | **+64 MB, one segment** |
+
+A segment never moves once allocated, which is what made the next step
+possible: a sealed segment can be a *mapping of a file* rather than heap.
+The flat array could never have been mapped, because every doubling
+invalidated every address.
+
+Measured on the real corpus -- 59,618,093 paragraphs built from the 31 GB
+CSV in 110 s at 543,753 rec/s, producing a 3.6 GB mapped file:
+
+| | resident | scan | throughput |
+|---|---|---|---|
+| heap, 20M records | 1222.6 MB | 25 ms | 12.13 GB/s |
+| **mapped, 59.6M records** | **1.8 MB** | 68 ms warm | 13.0 GB/s |
+| mapped, cold page cache | 1.8 MB | 281 ms | 3.17 GB/s |
+
+**59.6M records scanned in 1.8 MB of resident memory**, releasing each
+segment as it goes. Opening costs 0.01 ms against 42 ms to build and save,
+because opening does no parsing, no allocation and no copy -- the SoA arrays
+*are* the file's bytes.
+
+The cold row is the honest one and is why it is reported. mmap removes the
+copy and the RAM ceiling; it does not remove the read. A first query after a
+restart is storage-bound.
+
+This is the read-side twin of the streaming commit recorded above. That one
+stopped materialising the whole table to *write* it; this stops materialising
+it to *read* it. The same bug had both halves, and only one was fixed at the
+time.
+
+### wc -l is not a record count
+
+The builder stored 59,618,093 records where `wc -l` reports 68,027,639
+lines, and a gap that size is exactly the shape of work silently not done.
+It was correct: **8,185,964 rows carry embedded newlines inside quoted text
+fields**, so lines and CSV records are different quantities. Python's `csv`
+module independently agrees on 59,618,094 (the extra one being the header).
+
+This is why parsing went through libcsv rather than a split on commas. A
+hand-rolled parser would not have failed on those 8.2M rows -- it would have
+mis-fielded them, and a wrong field is a wrong record that looks fine.
+
+### Reranking the shortlist with floats: 10x R@1 for a third of a millisecond
+
+The scan compares 128-bit codes, which is fast and lossy. The float vectors
+are accurate and too slow to compare against everything. So the cheap thing
+narrows and the expensive thing orders -- the standard two-stage shape, with
+floats rather than a second model.
+
+Measured through the library path (`sigil_scan_similar_simd` then
+`sigil_side_rerank`) on 200,064 real corpus paragraphs, 1,191 queries,
+ground truth same-book:
+
+| method | R@1 | R@5 | R@10 | R@20 | ms/query |
+|---|---|---|---|---|---|
+| scan alone | 0.0059 | 0.0084 | 0.0168 | 0.0285 | 0.33 |
+| **scan + rerank** | **0.0605** | **0.1092** | **0.1360** | **0.1553** | **0.45** |
+
+**R@1 improves 10x for 0.12 ms.** The economy is entirely that stage one
+already reduced the corpus: a few hundred float comparisons cost nothing
+next to a scan that touched 200,064 records.
+
+An earlier prototype reported 0.0806 R@1 for rerank against 0.0269 for
+binary, and the difference from the table above is worth recording. The
+prototype ranked *all* records by Hamming and took the top 200 -- a full
+sort, 18 ms/query. The library uses a radius, which returns whatever falls
+inside it, unordered, in 0.33 ms. So the prototype measured rerank's
+*ceiling* and the library measures rerank *as it will actually run*; the
+second is the number to trust, and the ratio is larger there precisely
+because a radius-selected shortlist is less well ordered to begin with.
+
+Shortlist quality is an unturned dial. Widening the radius sweep from
+24-96 step 8 to 32-128 step 4 moved R@1 from 0.0378 to 0.0605 with no other
+change.
+
+### Asymmetric distance works and still lost
+
+The alternative was to keep the *query* as floats and compare against the
+stored bits -- quantising one side instead of both, which needs no extra
+storage at all. On the same data:
+
+| method | R@1 | R@10 | ms/query |
+|---|---|---|---|
+| binary | 0.0269 | 0.0924 | 18.6 |
+| asymmetric | 0.0411 | 0.1343 | 130.4 |
+| rerank | 0.0806 | 0.1872 | 18.6 |
+| float32 ceiling | 0.1008 | 0.2452 | 94.1 |
+
+It does what the theory says -- 53% better than binary for zero storage --
+but it gives up half of rerank's gain at seven times the cost, because
+comparing a float projection against a code means touching all 128 bits
+individually rather than a two-word XOR and popcount. Production
+implementations use a lookup table and are much faster, so 130 ms is this
+implementation's cost rather than the technique's floor; the accuracy
+figure should stand.
+
+It is the right answer when the vectors will not fit. Here they map.
+
+### What this rules out
+
+The idea it displaced was a second, larger embedding model over the middle
+of the distance distribution -- re-embedding the pairs that 128-bit MiniLM
+puts near 60 bits, on the theory that a better representation would separate
+them. Two independent measurements say there is nothing there to separate:
+
+- Same-book rate against distance decays monotonically with no plateau or
+  second mode, crossing chance at ~56 bits. At the median of 60 it is
+  **0.58x chance** -- pairs there are *less* related than random pairs.
+- Re-embedding banded pairs under bge-base-en-v1.5 (768 dimensions, double
+  MiniLM) found cosine separation of +0.098 at distance 30, decaying to
+  **-0.007 at 60**. A larger model finds no structure where the smaller one
+  found none.
+
+The bulk at 60 is the geometry of "unrelated", not hidden signal -- which is
+also evidence the LSH is behaving. A well-formed locality-sensitive hash
+should look like this: a large lump of unrelated pairs and a thin tail
+carrying everything.
+
+So the productive direction was never the middle. It was the tail, where
+the loss is real and measured: R@1 0.0059 to 0.0605, using vectors that
+already existed.
+
+---
+
 ## Machines
 
 | name | CPU | SIMD | accelerator |
