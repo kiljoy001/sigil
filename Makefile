@@ -83,7 +83,7 @@ BLAKE3 = third_party/blake3/blake3.c third_party/blake3/blake3_dispatch.c \
 SRC  = $(BLAKE3) src/sigil.c src/trit.c src/store.c src/scan_scalar.c \
        src/scan_x86.c src/scan_sse.c src/scan_neon.c src/scan_generic.c src/scan_range.c \
        src/simhash.c src/embed_llama.c src/utf8_repair.c src/split.c \
-       src/veccache.c
+       src/veccache.c src/store_map.c src/store_side.c
 OBJ  = $(SRC:.c=.o) $(OVOBJ)
 LIB  = libsigil.a
 
@@ -107,7 +107,7 @@ PLAN9 ?= $(HOME)/Repo/plan9port
 # text-encoding fix and the streaming writer this code now depends on.
 LIBTAB_SRC ?= $(HOME)/Repo/libtab
 
-.PHONY: all check check-semantic eval corpus bench bench-mt clean sbom sigilfs prop sanitize fuzz mutate oom segments
+.PHONY: all check check-semantic eval corpus bench bench-mt clean sbom sigilfs prop sanitize fuzz mutate oom segments mapped sidecar
 
 all: $(LIB)
 
@@ -142,13 +142,15 @@ test/eval: test/eval.c $(LIB)
 test/veccache: test/veccache.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< $(LIB) $(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS) -lstdc++
 
-check: test/differential test/unit test/bridge test/oom test/veccache test/segments cmd/sigilfs
+check: test/differential test/unit test/bridge test/oom test/veccache test/segments test/mapped test/sidecar cmd/sigilfs
 	./test/differential
 	./test/unit
 	./test/bridge
 	./test/oom
 	./test/veccache
 	./test/segments
+	./test/mapped
+	./test/sidecar
 	sh test/store.sh
 
 cmd/sigilfs:
@@ -193,6 +195,22 @@ test/segments: test/segments.c $(LIB)
 
 segments: test/segments
 	./test/segments
+
+# File-backed stores. See features/store_growth.feature and src/store_map.c src/store_side.c.
+test/mapped: test/mapped.c $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< $(LIB) \
+		$(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS) -lstdc++
+
+mapped: test/mapped
+	./test/mapped
+
+# Stage-two sidecars. See src/store_side.c.
+test/sidecar: test/sidecar.c $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< $(LIB) \
+		$(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS) -lstdc++
+
+sidecar: test/sidecar
+	./test/sidecar
 
 test/oom: test/oom.c cmd/bridge.o $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< cmd/bridge.o $(LIB) 		-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc 		$(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS) -lstdc++
@@ -240,9 +258,9 @@ test/fuzz_sigil: test/fuzz_sigil.c
 # The cache loader parses a file it did not necessarily write: a crash
 # leaves a partial line, and recovery is the worst moment for an
 # out-of-bounds read.
-test/fuzz_veccache: test/fuzz_veccache.c src/veccache.c
+test/fuzz_veccache: test/fuzz_veccache.c src/veccache.c src/store_map.c src/store_side.c
 	$(FUZZCC) -O1 -g -fsanitize=fuzzer,address,undefined -Iinclude \
-		$< src/veccache.c -o $@
+		$< src/veccache.c src/store_map.c src/store_side.c -o $@
 
 fuzz-veccache: test/fuzz_veccache
 	./test/fuzz_veccache -max_total_time=$(FUZZTIME) test/fuzz-corpus-vc

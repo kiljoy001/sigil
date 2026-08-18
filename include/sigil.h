@@ -220,6 +220,13 @@ typedef struct {
 	size_t    segcap;     /* entries the directories can hold */
 	size_t    count;
 	size_t    capacity;   /* nseg * SIGIL_SEG_RECS */
+
+	/* Set when the segments are mappings of a file rather than heap. The
+	 * directories are still heap; only what they point at is mapped, so
+	 * sigil_store_free() would call free() on a mapping. Release a mapped
+	 * store with sigil_store_unmap() instead. */
+	void     *map;        /* NULL when heap-backed */
+	size_t    maplen;
 } sigil_store_t;
 
 int  sigil_store_init(sigil_store_t *st, size_t capacity);
@@ -234,6 +241,105 @@ int sigil_store_get(const sigil_store_t *st, size_t i, sigil_t *out);
 /* Bytes in one LSH segment. The unit the store grows by, and what a caller
  * measuring the growth transient compares against. */
 size_t sigil_store_segment_bytes(void);
+
+/* ---------------------------------------------------------------------------
+ * Mapped stores
+ *
+ * A store can be backed by a file instead of the heap. Segments become
+ * mappings of that file, so opening one costs no parsing, no allocation and
+ * no copy: the SoA arrays *are* the file's bytes, and the kernel pages in
+ * only what a scan touches. Corpus size stops being bounded by RAM — a store
+ * larger than physical memory works, with clean file-backed pages evicted
+ * and re-read under pressure rather than the process dying.
+ *
+ * This is possible only because segments never move. The flat array could
+ * not have been mapped: every doubling invalidated every address.
+ *
+ * The mapped file is a *derived cache*, not the durable record. libtab
+ * remains the portable, human-readable store; this is a raw dump whose
+ * layout is the in-memory layout, so it bakes in endianness, SIGIL_SEG_RECS
+ * and SIGIL_LSH_BITS. The header records those and sigil_store_map() refuses
+ * a mismatch rather than reinterpreting bytes written under other rules. If
+ * the layout changes, delete and rebuild rather than migrate.
+ * ------------------------------------------------------------------------ */
+
+/* Write st to path as a mapped store. Returns 0, or -1 with errno set. */
+int sigil_store_save(const sigil_store_t *st, const char *path);
+
+/* Open path as a read-only mapped store. The store borrows the mapping and
+ * must be released with sigil_store_unmap(), not sigil_store_free().
+ * Returns 0, or -1 on a bad header, a layout mismatch, or an I/O error. */
+int sigil_store_map(sigil_store_t *st, const char *path);
+
+/* Release a mapped store. */
+void sigil_store_unmap(sigil_store_t *st);
+
+/* ---------------------------------------------------------------------------
+ * Stage-two refinement: a sidecar store
+ *
+ * The stage-one sigil is identity and index, and it never goes away. A
+ * sidecar holds a *second* code for a subset of records, produced by a
+ * different (usually larger) embedding model, so a query can rescore the
+ * candidates stage one selected without the corpus paying for the bigger
+ * model.
+ *
+ * Sparse by construction: stage one does the reduction, so the sidecar
+ * covers only the records worth a second look. Each entry is (index, code)
+ * with indices ascending, so a lookup is a binary search and a full pass is
+ * sequential.
+ *
+ * It is a separate file rather than a wider record on purpose. sigil_t is a
+ * fixed 64 bytes with a _Static_assert on it and an on-disk format that
+ * depends on that size; a second code would either break the record or make
+ * every store pay for a stage most will never run. A sidecar is optional --
+ * a store either has one or it does not -- and deleting it costs nothing but
+ * the recomputation.
+ *
+ * The sidecar records the model that produced it and the count of the store
+ * it refines. Codes from two different models are not comparable, and an
+ * index into the wrong store is not an error that announces itself, so
+ * sigil_side_map() refuses both rather than returning plausible neighbours.
+ * ------------------------------------------------------------------------ */
+
+#define SIGIL_SIDE_MODEL_MAX 64
+
+typedef struct {
+	const uint32_t *index;   /* [count] store indices, ascending */
+	const uint64_t *code;    /* [count * words] refined codes */
+	size_t count;
+	size_t words;            /* 64-bit words per code */
+	size_t bits;             /* code width, words * 64 */
+	char   model[SIGIL_SIDE_MODEL_MAX];
+	uint64_t base_count;     /* count of the store this refines */
+	void  *map;
+	size_t maplen;
+} sigil_side_t;
+
+/* Write a sidecar. `index` must be ascending; `code` is count*words words. */
+int sigil_side_save(const char *path, const uint32_t *index,
+                    const uint64_t *code, size_t count, size_t words,
+                    const char *model, uint64_t base_count);
+
+/* Open a sidecar read-only. Refuses a code width or base count that does not
+ * match `st`, and a model name that does not match `model` when non-NULL. */
+int sigil_side_map(sigil_side_t *sd, const char *path,
+                   const sigil_store_t *st, const char *model);
+
+void sigil_side_unmap(sigil_side_t *sd);
+
+/* The refined code for store index i, or NULL if i has no sidecar entry.
+ * Binary search over the ascending index. */
+const uint64_t *sigil_side_lookup(const sigil_side_t *sd, uint32_t i);
+
+/* Hamming distance between two refined codes of this sidecar's width. */
+uint32_t sigil_side_hamming(const sigil_side_t *sd, const uint64_t *a,
+                            const uint64_t *b);
+
+/* Hint that segment g will not be touched again, so the kernel may drop its
+ * pages now rather than waiting for memory pressure. A hint only: dropping
+ * clean file-backed pages is always safe, and they are re-read on the next
+ * touch. Returns 0, or -1 if the store is not mapped. */
+int sigil_store_release(const sigil_store_t *st, size_t g);
 
 /* Address of record i's LSH words, or NULL if i is out of range. Stable for
  * the life of the store: segments never move. Exposed because that stability
