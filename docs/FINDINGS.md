@@ -1769,6 +1769,65 @@ Shortlist quality is an unturned dial. Widening the radius sweep from
 24-96 step 8 to 32-128 step 4 moved R@1 from 0.0378 to 0.0605 with no other
 change.
 
+### Width and rerank fix different failures, and the SIMD kernels only do 128
+
+The assumption going in was that rerank makes width unnecessary -- if the
+right answer is in the shortlist, reordering finds it. Measured over 200,064
+paragraphs and 600 queries, that was wrong:
+
+| bits | scan R@1 | +rerank R@1 | +rerank R@20 |
+|---|---|---|---|
+| 128 | 0.0185 | 0.0758 | 0.2138 |
+| 256 | 0.0337 | 0.0926 | 0.2694 |
+| 512 | 0.0657 | **0.1044** | 0.2811 |
+| 1024 | 0.0842 | 0.1027 | 0.2862 |
+| 2048 | 0.0875 | 0.1027 | **0.2929** |
+| float32 | — | 0.1027 | 0.2929 |
+
+Rerank fixes **ordering**; width fixes **membership**. A narrow code drops
+the right answer before rerank can see it, and no amount of reordering
+recovers a candidate that is not in the list. 512 bits plus rerank reaches
+the float32 ceiling at R@1; at 2048 the reranked numbers are *identical* to
+float32 in every column, which is the saturation point -- the shortlist has
+become the set float32 would have chosen.
+
+Past 512 the rerank column stops moving while the scan column keeps
+climbing to 2048. So extra width beyond 512 only helps a caller who does not
+rerank.
+
+**The cost is linear in width, which an early measurement hid.** A harness
+that ranked every record and sorted all 200,064 reported 18.4 ms at 128 bits
+against 21.1 at 512 -- an apparent +15%. Through the real path
+(`sigil_scan_similar_*` with a radius, no full sort) the same comparison is:
+
+| bits | scan | GB/s |
+|---|---|---|
+| 128 | 0.447 ms | 6.67 |
+| 256 | 0.894 ms | 6.67 |
+| 512 | 1.716 ms | 6.95 |
+| 1024 | 4.689 ms | 5.09 |
+| 2048 | 8.401 ms | 5.68 |
+
+512 is 3.8x the cost of 128, not 1.15x. The ~18 ms floor in the first table
+was qsort overhead swamping the work being measured, and it made every width
+look nearly free.
+
+**And the vector kernels are 128-bit only.** Setting SIGIL_LSH_BITS to 512
+produced 486 differential failures: scan_x86.c packs two records per YMM
+register and sums `s[0] + s[1]` for each, which is correct at two words and
+silently wrong at eight. Forcing the scalar path drops it to one failure
+(the test that calls SSE directly), so the reference is width-agnostic and
+the three SIMD kernels are not. Going wider means generalising them to N
+words first.
+
+The `_Static_assert` on `sizeof(sigil_t)` fired on the same change, which is
+what it is for -- SIGIL_SIZE has to derive from the width rather than being
+a constant 64.
+
+So 128 bits with rerank is what ships for now: 0.0185 to 0.0758 R@1, four
+times better, on kernels that are already correct. Widening is a real gain
+and a real project, not a constant to edit.
+
 ### Asymmetric distance works and still lost
 
 The alternative was to keep the *query* as floats and compare against the

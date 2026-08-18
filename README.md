@@ -230,6 +230,15 @@ shortlist. Vectors live in a *sidecar* — a separate mapped file of
 `(index, vector)` pairs, sparse and sorted — rather than in the record,
 which is a fixed 64 bytes with a `_Static_assert` on it.
 
+Width and rerank fix different failures, and both were measured: rerank
+fixes *ordering* within a shortlist, width fixes *membership* of it. 512
+bits plus rerank reaches the float32 ceiling at R@1 (0.1044 against 0.1027),
+and at 2048 the reranked numbers equal float32 in every column. But the scan
+cost is linear in width — 0.447 ms at 128 against 1.716 at 512 through the
+real radius path — and the AVX2/SSE/NEON kernels are written for two 64-bit
+words, so a wider code needs them generalised first. 128 with rerank is what
+ships; widening is a real gain and a real project.
+
 Asymmetric distance was measured against the same data and lost: keeping the
 query as floats against stored bits reaches 0.0411 R@1 with no extra storage
 at all, but that is half of rerank's gain at seven times the cost. It is the
