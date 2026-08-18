@@ -3,6 +3,10 @@
 *.a
 test/differential
 test/bench
+test/segments
+test/mapped
+test/sidecar
+tools/build_store
 
 # Generated
 sbom.spdx.json
