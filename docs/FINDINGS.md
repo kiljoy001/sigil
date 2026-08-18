@@ -1585,6 +1585,100 @@ real corpus is the only thing that would have found it.
 
 ---
 
+## Per-segment compression buys nothing, and measuring it wrong nearly
+## produced a false alarm about the LSH bits
+
+The segmented store raised an obvious follow-on: compress a segment once it
+stops being written to, and buy back memory. Measured against the real
+corpus rather than argued about, the answer is no — and getting to that
+answer took two wrong measurements first, both worth recording because both
+looked convincing.
+
+### What each field can actually give up
+
+993,635 paragraphs sampled every 60th row across the whole corpus, so
+59,607 books, all lengths and eras are represented. zstd over each field
+dumped separately:
+
+| field | bytes/record | zstd-3 | zstd-19 | share of store |
+|---|---|---|---|---|
+| hash (BLAKE3) | 32 | **100.0%** | 99.9% | 50% |
+| lsh (SimHash) | 16 | **100.0%** | 99.8% | 25% |
+| para | 4 | 9.9% | 5.8% | 6% |
+| timestamp | 4 | 5.1% | 5.1% | 6% |
+| category | 2 | 5.2% | 3.5% | 3% |
+| trits | 2 | 0.0% | 0.0% | 3% |
+| cluster | 4 | 0.0% | 0.0% | 6% |
+
+**The two fields that are 75% of the store are the two that cannot
+compress, and this is by construction rather than by tuning.** BLAKE3 output
+is cryptographically uniform; SimHash bits are a projection designed to be
+uniformly distributed. A hash that compressed would be a broken hash.
+
+The ceiling is therefore about a third of 4.05 GB at 68.0M records, all of
+it from five fields that are individually 3-6% of the total. Against that:
+
+- a compressed segment cannot be scanned in place, and zstd decompresses at
+  ~1-2 GB/s against a scan measured at 15-20 GB/s — trading a quarter of the
+  memory for an order of magnitude of scan time;
+- compressed segments have no stable addresses, which is the one property
+  segmentation exists to provide and the precondition for mapping a sealed
+  segment from the store file.
+
+Bit-packing the five small fields to their true widths — `category` is a
+3-bit value in 16 bits, `para` a small dense integer in 32 — gets most of the
+same saving, stays directly addressable, and costs a shift and a mask. That
+is the same trade the trits field already makes.
+
+### The false alarm: 0.69 bit density from the placeholder, not from SimHash
+
+The first run of this measurement reported `lsh` compressing to 81.6% and a
+per-bit density of 0.693 against SimHash's expected 0.5, with all 128 bits
+biased toward 1. That reads as a serious defect — biased bits mean the code
+carries less than its nominal 128 bits of discrimination, Hamming distances
+compress toward each other, and separation between related and unrelated
+pairs shrinks.
+
+It was an artefact of the harness. No embedder was loaded, so
+`sigil_generate_para` fell through to the byte-shingle placeholder in
+`sigil.c`, which **only ever sets bits** — `out[b/64] |= 1ULL << (b%64)` per
+4-byte shingle, never clearing. A paragraph with 500 shingles ORs 500 times
+into 128 buckets, so almost every bit ends up 1. The 0.693 is a property of
+the placeholder and says nothing about SimHash.
+
+With `all-MiniLM-L6-v2` actually loaded, over 20,096 real corpus paragraphs:
+
+| | placeholder (no model) | real SimHash |
+|---|---|---|
+| mean bit density | 0.6927 | **0.4931** |
+| per-bit range | 0.556 - 0.850 | 0.190 - 0.855 |
+| bits outside 20/80 | 4 of 128 | 3 of 128 |
+| zstd-3 on lsh | 81.6% | **100.0%** |
+
+Real SimHash bits are balanced, incompressible, and carry no bias worth
+correcting. The `/stats` line that reports `embedder NONE -- lsh bits are a
+byte hash, not semantic` exists to prevent exactly this mistake, and this
+measurement walked into it anyway.
+
+### An earlier synthetic run was wrong in the other direction
+
+Before the corpus sample there was a 200,000-record run built from generated
+strings (`"paragraph number %zu of a book about things"`). It reported `lsh`
+at 34.3% and `para` at 0.2% — the first because near-duplicate short strings
+produce near-duplicate shingle sketches, the second because a clean modular
+pattern is trivially predictable. Both numbers were artefacts of the
+generator.
+
+**Three runs, three different answers for the same field: 34%, 82%, 100%.**
+Only the third used real data through the real pipeline. The rule this
+enforces is the one the corpus has now taught several times over — a
+measurement on invented input measures the invention. Compression ratios are
+an especially sharp case, because compressibility *is* a measure of how much
+structure the input has, and generated input has exactly the structure the
+generator put there.
+
+---
+
 ## Machines
 
 | name | CPU | SIMD | accelerator |

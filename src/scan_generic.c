@@ -47,21 +47,21 @@ void sigil_simd_unforce(void)
 {
 }
 
-size_t sigil_scan_similar_simd(const sigil_store_t *st, const uint64_t *query,
+size_t sigil_kernel_similar(const sigil_store_t *st, const uint64_t *query,
                                uint32_t max_distance,
                                uint32_t *out, size_t max_out)
 {
 	return sigil_scan_similar_scalar(st, query, max_distance, out, max_out);
 }
 
-size_t sigil_scan_timerange_simd(const sigil_store_t *st,
+size_t sigil_kernel_timerange(const sigil_store_t *st,
                                  uint32_t start, uint32_t end,
                                  uint32_t *out, size_t max_out)
 {
 	return sigil_scan_timerange_scalar(st, start, end, out, max_out);
 }
 
-size_t sigil_scan_category_simd(const sigil_store_t *st, uint16_t category,
+size_t sigil_kernel_category(const sigil_store_t *st, uint16_t category,
                                 uint32_t *out, size_t max_out)
 {
 	return sigil_scan_category_scalar(st, category, out, max_out);

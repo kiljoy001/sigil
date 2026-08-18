@@ -107,7 +107,7 @@ PLAN9 ?= $(HOME)/Repo/plan9port
 # text-encoding fix and the streaming writer this code now depends on.
 LIBTAB_SRC ?= $(HOME)/Repo/libtab
 
-.PHONY: all check check-semantic eval corpus bench bench-mt clean sbom sigilfs prop sanitize fuzz mutate oom
+.PHONY: all check check-semantic eval corpus bench bench-mt clean sbom sigilfs prop sanitize fuzz mutate oom segments
 
 all: $(LIB)
 
@@ -142,12 +142,13 @@ test/eval: test/eval.c $(LIB)
 test/veccache: test/veccache.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< $(LIB) $(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS) -lstdc++
 
-check: test/differential test/unit test/bridge test/oom test/veccache cmd/sigilfs
+check: test/differential test/unit test/bridge test/oom test/veccache test/segments cmd/sigilfs
 	./test/differential
 	./test/unit
 	./test/bridge
 	./test/oom
 	./test/veccache
+	./test/segments
 	sh test/store.sh
 
 cmd/sigilfs:
@@ -181,6 +182,18 @@ prop: test/prop
 # Allocation-failure paths, via ld --wrap. "Needs an out-of-memory condition"
 # is not a reason to leave error handling untested; it is a reason to inject
 # the failure deterministically.
+# Growth without copying, per features/store_growth.feature. Wraps
+# posix_memalign rather than malloc: the field arrays are aligned for the
+# AVX2 loads, so wrapping malloc would measure nothing while appearing to
+# work.
+test/segments: test/segments.c $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< $(LIB) \
+		-Wl,--wrap=posix_memalign,--wrap=free \
+		$(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS) -lstdc++
+
+segments: test/segments
+	./test/segments
+
 test/oom: test/oom.c cmd/bridge.o $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude -o $@ $< cmd/bridge.o $(LIB) 		-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc 		$(LLAMA_LDFLAGS) $(OV_LIB) $(LDLIBS) -lstdc++
 

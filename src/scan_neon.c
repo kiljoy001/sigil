@@ -73,10 +73,12 @@ void sigil_simd_unforce(void)
 {
 }
 
-size_t sigil_scan_similar_simd(const sigil_store_t *st, const uint64_t *query,
-                               uint32_t max_distance,
+size_t sigil_kernel_similar(const sigil_view_t *sv, const void *arg,
                                uint32_t *out, size_t max_out)
 {
+	const sigil_simarg_t *a = arg;
+	const uint64_t *query = a->query;
+	uint32_t max_distance = a->max_distance;
 	size_t n = 0, i = 0;
 	const uint64x2_t q = vld1q_u64(query);
 
@@ -85,9 +87,9 @@ size_t sigil_scan_similar_simd(const sigil_store_t *st, const uint64_t *query,
 	 * chains was measured and came out slower (19.8ms vs 18.1ms on
 	 * Cortex-A76) — the loop is memory-bound, so extra in-flight work buys
 	 * nothing and only adds register pressure. Kept simple deliberately. */
-	for (; i < st->count && n < max_out; i++) {
+	for (; i < sv->count && n < max_out; i++) {
 		uint8x16_t x = veorq_u8(
-			vreinterpretq_u8_u64(vld1q_u64(st->lsh + i * SIGIL_LSH_WORDS)),
+			vreinterpretq_u8_u64(vld1q_u64(sv->lsh + i * SIGIL_LSH_WORDS)),
 			vreinterpretq_u8_u64(q));
 		/* vcntq_u8 is a real per-byte popcount instruction; AVX2 has no
 		 * equivalent below AVX-512 and has to emulate it with a nibble
@@ -100,10 +102,11 @@ size_t sigil_scan_similar_simd(const sigil_store_t *st, const uint64_t *query,
 	return n;
 }
 
-size_t sigil_scan_timerange_simd(const sigil_store_t *st,
-                                 uint32_t start, uint32_t end,
+size_t sigil_kernel_timerange(const sigil_view_t *sv, const void *arg,
                                  uint32_t *out, size_t max_out)
 {
+	const sigil_timearg_t *a = arg;
+	uint32_t start = a->start, end = a->end;
 	size_t n = 0, i = 0;
 	const uint32x4_t lo = vdupq_n_u32(start);
 	const uint32x4_t hi = vdupq_n_u32(end);
@@ -119,9 +122,9 @@ size_t sigil_scan_timerange_simd(const sigil_store_t *st,
 	 * this kernel loses to scalar, because scalar's branch predictor
 	 * handles a mostly-false compare better than an unconditional store
 	 * plus four branches does. */
-	for (; i + 8 <= st->count && n + 8 <= max_out; i += 8) {
-		uint32x4_t v0 = vld1q_u32(st->timestamp + i);
-		uint32x4_t v1 = vld1q_u32(st->timestamp + i + 4);
+	for (; i + 8 <= sv->count && n + 8 <= max_out; i += 8) {
+		uint32x4_t v0 = vld1q_u32(sv->timestamp + i);
+		uint32x4_t v1 = vld1q_u32(sv->timestamp + i + 4);
 		uint32x4_t k0 = vandq_u32(vcgeq_u32(v0, lo), vcleq_u32(v0, hi));
 		uint32x4_t k1 = vandq_u32(vcgeq_u32(v1, lo), vcleq_u32(v1, hi));
 		uint32_t lanes[8];
@@ -137,8 +140,8 @@ size_t sigil_scan_timerange_simd(const sigil_store_t *st,
 		}
 	}
 
-	for (; i < st->count && n < max_out; i++) {
-		uint32_t t = st->timestamp[i];
+	for (; i < sv->count && n < max_out; i++) {
+		uint32_t t = sv->timestamp[i];
 
 		if (t >= start && t <= end)
 			out[n++] = (uint32_t)i;
@@ -146,14 +149,15 @@ size_t sigil_scan_timerange_simd(const sigil_store_t *st,
 	return n;
 }
 
-size_t sigil_scan_category_simd(const sigil_store_t *st, uint16_t category,
+size_t sigil_kernel_category(const sigil_view_t *sv, const void *arg,
                                 uint32_t *out, size_t max_out)
 {
+	uint16_t category = *(const uint16_t *)arg;
 	size_t n = 0, i = 0;
 	const uint16x8_t q = vdupq_n_u16(category);
 
-	for (; i + 8 <= st->count && n + 8 <= max_out; i += 8) {
-		uint16x8_t v  = vld1q_u16(st->category + i);
+	for (; i + 8 <= sv->count && n + 8 <= max_out; i += 8) {
+		uint16x8_t v  = vld1q_u16(sv->category + i);
 		uint16x8_t eq = vceqq_u16(v, q);
 		uint16_t lanes[8];
 
@@ -169,8 +173,8 @@ size_t sigil_scan_category_simd(const sigil_store_t *st, uint16_t category,
 		}
 	}
 
-	for (; i < st->count && n < max_out; i++) {
-		if (st->category[i] == category)
+	for (; i < sv->count && n < max_out; i++) {
+		if (sv->category[i] == category)
 			out[n++] = (uint32_t)i;
 	}
 	return n;

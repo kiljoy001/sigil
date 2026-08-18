@@ -21,10 +21,31 @@
 #include <string.h>
 #include <sys/stat.h>
 
+/*
+ * Interned paths.
+ *
+ * One strdup per paragraph stored the same string 68 million times: a
+ * Gutenberg-scale corpus is 68.0M paragraphs across 79,133 books, so the
+ * pointer-plus-string cost was 4.3 GB of the server's 9.6 GB resident, and
+ * 99.9% of it duplicate. Paragraphs of one file share one string, and a
+ * record keeps a 4-byte id instead of an 8-byte pointer to its own copy.
+ *
+ * Open addressing with linear probing over a power-of-two table. The set is
+ * only ever added to -- a path is never forgotten while records reference it
+ * -- so there are no tombstones and a probe stops at the first empty slot.
+ */
+struct interns {
+	char **str;          /* [ncap] unique strings, owned; index == id */
+	size_t n, ncap;
+	unsigned *tab;       /* [tcap] id+1 per slot, 0 = empty */
+	size_t tcap;
+};
+
 /* Opaque to the plan9port side. */
 struct bridge {
 	sigil_store_t st;
-	char **paths;        /* [cap] parallel to store rows */
+	unsigned *paths;     /* [cap] intern id per row, parallel to store rows */
+	struct interns in;
 	unsigned *paras;
 	/* Where the paragraph sits in its file. The store holds only the
 	 * sigil, so without this a neighbour can be identified but not read,
@@ -189,11 +210,110 @@ br_embed_dim(void *p)
 	return (b == NULL || b->emb == NULL) ? 0 : (unsigned)b->emb->dim(b->emb);
 }
 
+/* FNV-1a. Paths share long prefixes -- /mnt/bulk/gutenberg/1/6/0/1602.txt --
+ * so the hash must depend on the whole string, and the trailing bytes are
+ * where they differ. */
+static unsigned long
+pathhash(const char *s)
+{
+	unsigned long h = 1469598103934665603UL;
+
+	for (; *s != '\0'; s++) {
+		h ^= (unsigned char)*s;
+		h *= 1099511628211UL;
+	}
+	return h;
+}
+
+static int intern_rehash(struct interns *in, size_t tcap);
+
+/*
+ * Return the id for s, adding it if new. Returns -1 on allocation failure,
+ * which the callers treat exactly as they treated a failed strdup.
+ */
+static long
+intern(struct interns *in, const char *s)
+{
+	unsigned long h;
+	size_t slot;
+
+	if (s == NULL)
+		s = "";
+	if (in->tcap == 0 && intern_rehash(in, 1024) != 0)
+		return -1;
+
+	h = pathhash(s);
+	slot = (size_t)h & (in->tcap - 1);
+	while (in->tab[slot] != 0) {
+		unsigned id = in->tab[slot] - 1;
+
+		if (strcmp(in->str[id], s) == 0)
+			return (long)id;
+		slot = (slot + 1) & (in->tcap - 1);
+	}
+
+	/* Keep the load factor under 1/2: linear probing degrades sharply
+	 * past that, and this table is only ever added to. */
+	if ((in->n + 1) * 2 >= in->tcap) {
+		if (intern_rehash(in, in->tcap * 2) != 0)
+			return -1;
+		slot = (size_t)h & (in->tcap - 1);
+		while (in->tab[slot] != 0)
+			slot = (slot + 1) & (in->tcap - 1);
+	}
+
+	if (in->n == in->ncap) {
+		size_t nc = in->ncap ? in->ncap * 2 : 1024;
+		char **ns = realloc(in->str, nc * sizeof *ns);
+
+		if (ns == NULL)
+			return -1;
+		in->str = ns;
+		in->ncap = nc;
+	}
+	if ((in->str[in->n] = strdup(s)) == NULL)
+		return -1;
+	in->tab[slot] = (unsigned)in->n + 1;
+	return (long)in->n++;
+}
+
+static int
+intern_rehash(struct interns *in, size_t tcap)
+{
+	unsigned *tab = calloc(tcap, sizeof *tab);
+	size_t i;
+
+	if (tab == NULL)
+		return -1;
+	for (i = 0; i < in->n; i++) {
+		size_t slot = (size_t)pathhash(in->str[i]) & (tcap - 1);
+
+		while (tab[slot] != 0)
+			slot = (slot + 1) & (tcap - 1);
+		tab[slot] = (unsigned)i + 1;
+	}
+	free(in->tab);
+	in->tab = tab;
+	in->tcap = tcap;
+	return 0;
+}
+
+static void
+intern_free(struct interns *in)
+{
+	size_t i;
+
+	for (i = 0; i < in->n; i++)
+		free(in->str[i]);
+	free(in->str);
+	free(in->tab);
+	memset(in, 0, sizeof *in);
+}
+
 void
 br_free(void *p)
 {
 	struct bridge *b = p;
-	size_t i;
 
 	if (b == NULL)
 		return;
@@ -201,8 +321,7 @@ br_free(void *p)
 		sigil_simhash_free(&b->sh);
 	if (b->emb != NULL)
 		b->emb->destroy(b->emb);
-	for (i = 0; i < b->n; i++)
-		free(b->paths[i]);
+	intern_free(&b->in);
 	free(b->paths);
 	free(b->paras);
 	free(b->offs);
@@ -226,7 +345,7 @@ static int
 grow(struct bridge *b)
 {
 	size_t cap = b->cap * 2;
-	char **np = realloc(b->paths, cap * sizeof *np);
+	unsigned *np = realloc(b->paths, cap * sizeof *np);
 	unsigned *nq;
 
 	if (np == NULL)
@@ -343,9 +462,15 @@ br_add_at(void *p, const char *path, unsigned para, const void *text,
 	}
 
 publish:
-	if (sigil_store_push(&b->st, &s) < 0)
-		return -1;
-	b->paths[b->n] = strdup(path ? path : "");
+	{
+		long id = intern(&b->in, path);
+
+		if (id < 0)
+			return -1;
+		if (sigil_store_push(&b->st, &s) < 0)
+			return -1;
+		b->paths[b->n] = (unsigned)id;
+	}
 	b->paras[b->n] = para;
 	b->offs[b->n] = off;
 	b->lens[b->n] = (unsigned long)len;
@@ -401,20 +526,25 @@ publish:
 	 * change under it.
 	 */
 	for (i = 0; i < b->bn; i++) {
+		long id;
+
 		if (b->n == b->cap && grow(b) != 0)
+			break;
+		if ((id = intern(&b->in, b->bpath[i])) < 0)
 			break;
 		if (sigil_store_push(&b->st, &b->bpend[i]) < 0)
 			break;
-		b->paths[b->n] = b->bpath[i];       /* ownership transfers */
+		b->paths[b->n] = (unsigned)id;
 		b->paras[b->n] = b->bpara[i];
 		b->offs[b->n] = b->boff[i];
 		b->lens[b->n] = b->blenrec[i];
 		b->n++;
-		b->bpath[i] = NULL;
 	}
+	/* The batch's path copy is no longer handed on -- intern() keeps its
+	 * own -- so every one of them is freed here. */
 	for (i = 0; i < b->bn; i++) {
 		free(b->btext[i]);
-		free(b->bpath[i]);                  /* NULL if it was handed on */
+		free(b->bpath[i]);
 	}
 	b->bn = 0;
 }
@@ -488,7 +618,9 @@ br_path(void *p, long i)
 {
 	struct bridge *b = p;
 
-	return (b == NULL || i < 0 || (size_t)i >= b->n) ? NULL : b->paths[i];
+	if (b == NULL || i < 0 || (size_t)i >= b->n)
+		return NULL;
+	return b->in.str[b->paths[i]];
 }
 
 unsigned
@@ -632,7 +764,12 @@ br_add_restore(void *p, const char *path, unsigned para, const char *lshhex,
                       : (d >= 'A' && d <= 'F') ? d - 'A' + 10 : 0;
                     hi = (hi << 4) | d;
                 }
-                b->st.hash[(size_t)i * SIGIL_HASH_LEN + j] = (uint8_t)hi;
+                /* Segment directory, not one flat array: indexing this
+                 * as hash[i * LEN + j] wrote over a segment pointer and
+                 * crashed in the next store_get. */
+                b->st.hash[(size_t)i >> SIGIL_SEG_SHIFT]
+                          [(((size_t)i & SIGIL_SEG_MASK) * SIGIL_HASH_LEN)
+                           + (size_t)j] = (uint8_t)hi;
             }
         }
         b->lens[i] = len;

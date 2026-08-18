@@ -168,27 +168,58 @@ void sigil_to_hex(const sigil_t *s, char *buf);
 int sigil_from_hex(const char *hex, sigil_t *out);
 
 /* ---------------------------------------------------------------------------
- * Store: struct-of-arrays
+ * Store: segmented struct-of-arrays
  *
  * Sigils are stored decomposed by field, not as an array of structs. A
  * similarity pass over N records touches 4N bytes of LSH words instead of 32N
  * bytes of whole sigils — an 8x reduction in memory traffic, which is the
  * binding constraint. Full records are reassembled only for survivors.
  *
- * Field arrays are 32-byte aligned so vector loads stay aligned on both
- * AVX2 (32-byte) and NEON (16-byte).
+ * Each field is a list of fixed-size segments rather than one contiguous
+ * array. Growth appends a segment; nothing already written is copied or
+ * moved.
+ *
+ * The flat version doubled by allocating a second set of all seven arrays,
+ * copying into it, and freeing the first — both live at once, so the peak was
+ * old + new, 1.5x the final size. Measured on an 8.4M record fill, virtual
+ * size went 297.5 MB -> 601.5 MB across the last doubling; at 68.0M
+ * paragraphs the transient is tens of gigabytes. Worse, it asked for seven
+ * large contiguous blocks and discarded the store if any one failed, which
+ * fragmentation can cause while ample memory is free.
+ *
+ * A segment never moves once allocated, so a pointer into it stays valid for
+ * the life of the store. That is what makes it possible for a sealed segment
+ * to later be a mapping of the store file rather than heap memory: the flat
+ * array could never promise it, because every doubling invalidated every
+ * address.
+ *
+ * Segments are 32-byte aligned so vector loads stay aligned on both AVX2
+ * (32-byte) and NEON (16-byte), and hold a power-of-two record count so
+ * indexing is a shift and a mask.
  * ------------------------------------------------------------------------ */
 
+/* Records per segment. 1 << 20 puts one LSH segment at 16 MB and one hash
+ * segment at 32 MB — large enough that the directory stays small at corpus
+ * scale (68.0M records is 65 segments), small enough that a single failed
+ * allocation costs little. */
+#define SIGIL_SEG_SHIFT 20
+#define SIGIL_SEG_RECS  ((size_t)1 << SIGIL_SEG_SHIFT)
+#define SIGIL_SEG_MASK  (SIGIL_SEG_RECS - 1)
+
 typedef struct {
-	uint64_t *lsh;        /* [count * SIGIL_LSH_WORDS], row-major */
-	uint32_t *para;       /* [count] */
-	uint32_t *cluster;    /* [count] */
-	uint32_t *timestamp;  /* [count] */
-	uint16_t *category;   /* [count] */
-	uint16_t *trits;      /* [count] */
-	uint8_t  *hash;       /* [count * SIGIL_HASH_LEN], row-major */
+	/* Segment directories. Each entry points at SIGIL_SEG_RECS records'
+	 * worth of that field; nseg entries are live. */
+	uint64_t **lsh;       /* [nseg][SIGIL_SEG_RECS * SIGIL_LSH_WORDS] */
+	uint32_t **para;
+	uint32_t **cluster;
+	uint32_t **timestamp;
+	uint16_t **category;
+	uint16_t **trits;
+	uint8_t  **hash;      /* [nseg][SIGIL_SEG_RECS * SIGIL_HASH_LEN] */
+	size_t    nseg;       /* segments allocated */
+	size_t    segcap;     /* entries the directories can hold */
 	size_t    count;
-	size_t    capacity;
+	size_t    capacity;   /* nseg * SIGIL_SEG_RECS */
 } sigil_store_t;
 
 int  sigil_store_init(sigil_store_t *st, size_t capacity);
@@ -199,6 +230,15 @@ ptrdiff_t sigil_store_push(sigil_store_t *st, const sigil_t *s);
 
 /* Reassemble record i. Returns 0 on success, -1 if i is out of range. */
 int sigil_store_get(const sigil_store_t *st, size_t i, sigil_t *out);
+
+/* Bytes in one LSH segment. The unit the store grows by, and what a caller
+ * measuring the growth transient compares against. */
+size_t sigil_store_segment_bytes(void);
+
+/* Address of record i's LSH words, or NULL if i is out of range. Stable for
+ * the life of the store: segments never move. Exposed because that stability
+ * is a promise of the structure, and test/segments.c is what holds it. */
+const uint64_t *sigil_store_lsh_ptr(const sigil_store_t *st, size_t i);
 
 /* ---------------------------------------------------------------------------
  * Scan kernels
@@ -211,7 +251,57 @@ int sigil_store_get(const sigil_store_t *st, size_t i, sigil_t *out);
  *
  * All kernels write matching indices into out[] (caller-allocated, capacity
  * max_out) and return the number written.
+ *
+ * A kernel works on a sigil_view_t: flat field pointers and a count, which is
+ * what it always operated on in practice. The store became a list of
+ * segments, and a view is one contiguous piece of one segment, so segment
+ * traversal lives in sigil_scan_walk() and none of it reached the four
+ * kernels. Indices a kernel returns are relative to its view; the walker
+ * rebases them.
  * ------------------------------------------------------------------------ */
+
+typedef struct {
+	const uint64_t *lsh;
+	const uint32_t *para;
+	const uint32_t *cluster;
+	const uint32_t *timestamp;
+	const uint16_t *category;
+	const uint16_t *trits;
+	const uint8_t  *hash;
+	size_t          count;
+} sigil_view_t;
+
+typedef size_t (*sigil_scan_fn)(const sigil_view_t *v, const void *arg,
+                                uint32_t *out, size_t max_out);
+
+typedef struct {
+	const uint64_t *query;
+	uint32_t max_distance;
+} sigil_simarg_t;
+
+typedef struct {
+	uint32_t start, end;
+} sigil_timearg_t;
+
+/* Walk [lo, hi) segment by segment, applying fn to each piece. */
+size_t sigil_scan_walk(const sigil_store_t *st, size_t lo, size_t hi,
+                       sigil_scan_fn fn, const void *arg,
+                       uint32_t *out, size_t max_out);
+
+/* The kernels. `_scalar` is the definition of correct; the unsuffixed name
+ * dispatches to the widest vector path the CPU offers. */
+size_t sigil_kernel_similar(const sigil_view_t *v, const void *arg,
+                            uint32_t *out, size_t max_out);
+size_t sigil_kernel_timerange(const sigil_view_t *v, const void *arg,
+                              uint32_t *out, size_t max_out);
+size_t sigil_kernel_category(const sigil_view_t *v, const void *arg,
+                             uint32_t *out, size_t max_out);
+size_t sigil_kernel_similar_scalar(const sigil_view_t *v, const void *arg,
+                                   uint32_t *out, size_t max_out);
+size_t sigil_kernel_timerange_scalar(const sigil_view_t *v, const void *arg,
+                                     uint32_t *out, size_t max_out);
+size_t sigil_kernel_category_scalar(const sigil_view_t *v, const void *arg,
+                                    uint32_t *out, size_t max_out);
 
 /* Indices where the Hamming distance between lsh[i] and query (which points
  * to SIGIL_LSH_WORDS words) is <= max_distance. */

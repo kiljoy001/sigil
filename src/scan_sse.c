@@ -43,10 +43,12 @@
  * lane boundaries to respect, because the register *is* the record.
  */
 __attribute__((target("sse4.2,ssse3")))
-size_t sigil_scan_similar_sse(const sigil_store_t *st, const uint64_t *query,
-                              uint32_t max_distance,
+size_t sigil_scan_similar_sse(const sigil_view_t *sv, const void *arg,
                               uint32_t *out, size_t max_out)
 {
+	const sigil_simarg_t *a = arg;
+	const uint64_t *query = a->query;
+	uint32_t max_distance = a->max_distance;
 	size_t n = 0, i = 0;
 	const __m128i lut = _mm_setr_epi8(
 		0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
@@ -54,9 +56,9 @@ size_t sigil_scan_similar_sse(const sigil_store_t *st, const uint64_t *query,
 	const __m128i zero = _mm_setzero_si128();
 	const __m128i q = _mm_loadu_si128((const __m128i *)query);
 
-	for (; i < st->count && n < max_out; i++) {
+	for (; i < sv->count && n < max_out; i++) {
 		__m128i v = _mm_loadu_si128(
-			(const __m128i *)(st->lsh + i * SIGIL_LSH_WORDS));
+			(const __m128i *)(sv->lsh + i * SIGIL_LSH_WORDS));
 		__m128i x = _mm_xor_si128(v, q);
 		__m128i lo = _mm_and_si128(x, mask);
 		__m128i hi = _mm_and_si128(_mm_srli_epi16(x, 4), mask);
@@ -74,10 +76,11 @@ size_t sigil_scan_similar_sse(const sigil_store_t *st, const uint64_t *query,
 }
 
 __attribute__((target("sse4.2,ssse3")))
-size_t sigil_scan_timerange_sse(const sigil_store_t *st,
-                                uint32_t start, uint32_t end,
+size_t sigil_scan_timerange_sse(const sigil_view_t *sv, const void *arg,
                                 uint32_t *out, size_t max_out)
 {
+	const sigil_timearg_t *a = arg;
+	uint32_t start = a->start, end = a->end;
 	size_t n = 0, i = 0;
 	/* SSE has only signed 32-bit compares, same as AVX2, so bias by 2^31
 	 * to turn unsigned order into signed order. */
@@ -85,8 +88,8 @@ size_t sigil_scan_timerange_sse(const sigil_store_t *st,
 	const __m128i lo   = _mm_set1_epi32((int)(start ^ 0x80000000u));
 	const __m128i hi   = _mm_set1_epi32((int)(end   ^ 0x80000000u));
 
-	for (; i + 4 <= st->count && n + 4 <= max_out; i += 4) {
-		__m128i v = _mm_loadu_si128((const __m128i *)(st->timestamp + i));
+	for (; i + 4 <= sv->count && n + 4 <= max_out; i += 4) {
+		__m128i v = _mm_loadu_si128((const __m128i *)(sv->timestamp + i));
 		__m128i b = _mm_xor_si128(v, bias);
 		__m128i too_low  = _mm_cmplt_epi32(b, lo);
 		__m128i too_high = _mm_cmpgt_epi32(b, hi);
@@ -103,8 +106,8 @@ size_t sigil_scan_timerange_sse(const sigil_store_t *st,
 		}
 	}
 
-	for (; i < st->count && n < max_out; i++) {
-		uint32_t t = st->timestamp[i];
+	for (; i < sv->count && n < max_out; i++) {
+		uint32_t t = sv->timestamp[i];
 
 		if (t >= start && t <= end)
 			out[n++] = (uint32_t)i;
@@ -113,14 +116,15 @@ size_t sigil_scan_timerange_sse(const sigil_store_t *st,
 }
 
 __attribute__((target("sse4.2,ssse3")))
-size_t sigil_scan_category_sse(const sigil_store_t *st, uint16_t category,
+size_t sigil_scan_category_sse(const sigil_view_t *sv, const void *arg,
                                uint32_t *out, size_t max_out)
 {
+	uint16_t category = *(const uint16_t *)arg;
 	size_t n = 0, i = 0;
 	const __m128i q = _mm_set1_epi16((short)category);
 
-	for (; i + 8 <= st->count && n + 8 <= max_out; i += 8) {
-		__m128i v  = _mm_loadu_si128((const __m128i *)(st->category + i));
+	for (; i + 8 <= sv->count && n + 8 <= max_out; i += 8) {
+		__m128i v  = _mm_loadu_si128((const __m128i *)(sv->category + i));
 		__m128i eq = _mm_cmpeq_epi16(v, q);
 		/* movemask_epi8 gives two bits per 16-bit lane; both set or both
 		 * clear, so step by pairs. */
@@ -134,8 +138,8 @@ size_t sigil_scan_category_sse(const sigil_store_t *st, uint16_t category,
 		}
 	}
 
-	for (; i < st->count && n < max_out; i++) {
-		if (st->category[i] == category)
+	for (; i < sv->count && n < max_out; i++) {
+		if (sv->category[i] == category)
 			out[n++] = (uint32_t)i;
 	}
 	return n;

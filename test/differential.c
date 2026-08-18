@@ -183,13 +183,47 @@ static void test_trits(void)
  * Calling them directly is the only way to check that claim here, and a wrong
  * kernel does not crash: it returns a slightly wrong neighbour list forever.
  */
-size_t sigil_scan_similar_sse(const sigil_store_t *st, const uint64_t *query,
-                              uint32_t max_distance, uint32_t *out,
-                              size_t max_out);
-size_t sigil_scan_timerange_sse(const sigil_store_t *st, uint32_t start,
-                                uint32_t end, uint32_t *out, size_t max_out);
-size_t sigil_scan_category_sse(const sigil_store_t *st, uint16_t category,
+size_t sigil_scan_similar_sse(const sigil_view_t *sv, const void *arg,
+                              uint32_t *out, size_t max_out);
+size_t sigil_scan_timerange_sse(const sigil_view_t *sv, const void *arg,
+                                uint32_t *out, size_t max_out);
+size_t sigil_scan_category_sse(const sigil_view_t *sv, const void *arg,
                                uint32_t *out, size_t max_out);
+
+/* The kernels take a view, so a whole-store comparison goes through the
+ * segment walker -- which is also what a real scan does. Driving them any
+ * other way would compare something the library never runs. */
+static size_t
+sse_similar(const sigil_store_t *st, const uint64_t *q, uint32_t r,
+            uint32_t *out, size_t max_out)
+{
+	sigil_simarg_t a;
+
+	a.query = q;
+	a.max_distance = r;
+	return sigil_scan_walk(st, 0, st->count, sigil_scan_similar_sse, &a,
+	                       out, max_out);
+}
+
+static size_t
+sse_timerange(const sigil_store_t *st, uint32_t start, uint32_t end,
+              uint32_t *out, size_t max_out)
+{
+	sigil_timearg_t a;
+
+	a.start = start;
+	a.end = end;
+	return sigil_scan_walk(st, 0, st->count, sigil_scan_timerange_sse, &a,
+	                       out, max_out);
+}
+
+static size_t
+sse_category(const sigil_store_t *st, uint16_t cat, uint32_t *out,
+             size_t max_out)
+{
+	return sigil_scan_walk(st, 0, st->count, sigil_scan_category_sse, &cat,
+	                       out, max_out);
+}
 
 static void
 test_sse_and_ranged(void)
@@ -221,7 +255,7 @@ test_sse_and_ranged(void)
 	/* SSE against scalar, at several radii including the extremes. */
 	for (i = 0; i <= SIGIL_LSH_BITS; i += 16) {
 		na = sigil_scan_similar_scalar(&st, q, (uint32_t)i, a, 4096);
-		nb = sigil_scan_similar_sse(&st, q, (uint32_t)i, b, 4096);
+		nb = sse_similar(&st, q, (uint32_t)i, b, 4096);
 		if (na != nb || memcmp(a, b, na * sizeof *a) != 0) {
 			printf("  FAIL sse similar at radius %zu\n", i);
 			failures++;
@@ -232,7 +266,7 @@ test_sse_and_ranged(void)
 		printf("  ok   sse similar matches scalar at every radius\n");
 
 	na = sigil_scan_timerange_scalar(&st, 100, 2000, a, 4096);
-	nb = sigil_scan_timerange_sse(&st, 100, 2000, b, 4096);
+	nb = sse_timerange(&st, 100, 2000, b, 4096);
 	if (na != nb || memcmp(a, b, na * sizeof *a) != 0) {
 		printf("  FAIL sse timerange\n");
 		failures++;
@@ -241,7 +275,7 @@ test_sse_and_ranged(void)
 	}
 
 	na = sigil_scan_category_scalar(&st, 3, a, 4096);
-	nb = sigil_scan_category_sse(&st, 3, b, 4096);
+	nb = sse_category(&st, 3, b, 4096);
 	if (na != nb || memcmp(a, b, na * sizeof *a) != 0) {
 		printf("  FAIL sse category\n");
 		failures++;

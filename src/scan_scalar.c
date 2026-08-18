@@ -11,42 +11,43 @@
 
 #include "sigil.h"
 
-size_t sigil_scan_similar_scalar(const sigil_store_t *st, const uint64_t *query,
-                                 uint32_t max_distance,
-                                 uint32_t *out, size_t max_out)
-{
-	size_t n = 0;
-
-	for (size_t i = 0; i < st->count && n < max_out; i++) {
-		if (sigil_hamming(st->lsh + i * SIGIL_LSH_WORDS, query)
-		    <= max_distance)
-			out[n++] = (uint32_t)i;
-	}
-	return n;
-}
-
-size_t sigil_scan_timerange_scalar(const sigil_store_t *st,
-                                   uint32_t start, uint32_t end,
+size_t sigil_kernel_similar_scalar(const sigil_view_t *v, const void *arg,
                                    uint32_t *out, size_t max_out)
 {
+	const sigil_simarg_t *a = arg;
 	size_t n = 0;
 
-	for (size_t i = 0; i < st->count && n < max_out; i++) {
-		uint32_t t = st->timestamp[i];
-
-		if (t >= start && t <= end)
+	for (size_t i = 0; i < v->count && n < max_out; i++) {
+		if (sigil_hamming(v->lsh + i * SIGIL_LSH_WORDS, a->query)
+		    <= a->max_distance)
 			out[n++] = (uint32_t)i;
 	}
 	return n;
 }
 
-size_t sigil_scan_category_scalar(const sigil_store_t *st, uint16_t category,
-                                  uint32_t *out, size_t max_out)
+size_t sigil_kernel_timerange_scalar(const sigil_view_t *v, const void *arg,
+                                     uint32_t *out, size_t max_out)
 {
+	const sigil_timearg_t *a = arg;
 	size_t n = 0;
 
-	for (size_t i = 0; i < st->count && n < max_out; i++) {
-		if (st->category[i] == category)
+	for (size_t i = 0; i < v->count && n < max_out; i++) {
+		uint32_t t = v->timestamp[i];
+
+		if (t >= a->start && t <= a->end)
+			out[n++] = (uint32_t)i;
+	}
+	return n;
+}
+
+size_t sigil_kernel_category_scalar(const sigil_view_t *v, const void *arg,
+                                    uint32_t *out, size_t max_out)
+{
+	uint16_t category = *(const uint16_t *)arg;
+	size_t n = 0;
+
+	for (size_t i = 0; i < v->count && n < max_out; i++) {
+		if (v->category[i] == category)
 			out[n++] = (uint32_t)i;
 	}
 	return n;

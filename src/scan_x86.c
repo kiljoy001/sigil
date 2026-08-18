@@ -106,13 +106,11 @@ int sigil_simd_paths(int *avx2, int *sse42)
 
 /* Implemented in scan_sse.c; declared here rather than in the public header
  * because callers pick a path through the _simd entry points, not directly. */
-size_t sigil_scan_similar_sse(const sigil_store_t *st, const uint64_t *query,
-                              uint32_t max_distance,
+size_t sigil_scan_similar_sse(const sigil_view_t *sv, const void *arg,
                               uint32_t *out, size_t max_out);
-size_t sigil_scan_timerange_sse(const sigil_store_t *st,
-                                uint32_t start, uint32_t end,
+size_t sigil_scan_timerange_sse(const sigil_view_t *sv, const void *arg,
                                 uint32_t *out, size_t max_out);
-size_t sigil_scan_category_sse(const sigil_store_t *st, uint16_t category,
+size_t sigil_scan_category_sse(const sigil_view_t *sv, const void *arg,
                                uint32_t *out, size_t max_out);
 
 
@@ -135,10 +133,12 @@ size_t sigil_scan_category_sse(const sigil_store_t *st, uint16_t category,
  * distance, and the halves are independent — no cross-lane shuffles.
  */
 __attribute__((target("avx2")))
-static size_t scan_similar_avx2(const sigil_store_t *st, const uint64_t *query,
-                               uint32_t max_distance,
+static size_t scan_similar_avx2(const sigil_view_t *sv, const void *arg,
                                uint32_t *out, size_t max_out)
 {
+	const sigil_simarg_t *a = arg;
+	const uint64_t *query = a->query;
+	uint32_t max_distance = a->max_distance;
 	size_t n = 0, i = 0;
 	const __m256i lut = _mm256_setr_epi8(
 		0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
@@ -150,9 +150,9 @@ static size_t scan_similar_avx2(const sigil_store_t *st, const uint64_t *query,
 	                                     (long long)query[0], (long long)query[1]);
 
 	/* Two records per iteration. */
-	for (; i + 2 <= st->count && n + 2 <= max_out; i += 2) {
+	for (; i + 2 <= sv->count && n + 2 <= max_out; i += 2) {
 		__m256i v = _mm256_loadu_si256(
-			(const __m256i *)(st->lsh + i * SIGIL_LSH_WORDS));
+			(const __m256i *)(sv->lsh + i * SIGIL_LSH_WORDS));
 		__m256i x = _mm256_xor_si256(v, q);
 		__m256i lo = _mm256_and_si256(x, mask);
 		__m256i hi = _mm256_and_si256(_mm256_srli_epi16(x, 4), mask);
@@ -170,8 +170,8 @@ static size_t scan_similar_avx2(const sigil_store_t *st, const uint64_t *query,
 			out[n++] = (uint32_t)(i + 1);
 	}
 
-	for (; i < st->count && n < max_out; i++) {
-		if (sigil_hamming(st->lsh + i * SIGIL_LSH_WORDS, query)
+	for (; i < sv->count && n < max_out; i++) {
+		if (sigil_hamming(sv->lsh + i * SIGIL_LSH_WORDS, query)
 		    <= max_distance)
 			out[n++] = (uint32_t)i;
 	}
@@ -179,10 +179,11 @@ static size_t scan_similar_avx2(const sigil_store_t *st, const uint64_t *query,
 }
 
 __attribute__((target("avx2")))
-static size_t scan_timerange_avx2(const sigil_store_t *st,
-                                 uint32_t start, uint32_t end,
+static size_t scan_timerange_avx2(const sigil_view_t *sv, const void *arg,
                                  uint32_t *out, size_t max_out)
 {
+	const sigil_timearg_t *a = arg;
+	uint32_t start = a->start, end = a->end;
 	size_t n = 0, i = 0;
 	/* Timestamps are unsigned but AVX2 only has signed 32-bit compares.
 	 * Bias by 2^31 so unsigned order becomes signed order. */
@@ -190,8 +191,8 @@ static size_t scan_timerange_avx2(const sigil_store_t *st,
 	const __m256i lo   = _mm256_set1_epi32((int)(start ^ 0x80000000u));
 	const __m256i hi   = _mm256_set1_epi32((int)(end   ^ 0x80000000u));
 
-	for (; i + 8 <= st->count && n + 8 <= max_out; i += 8) {
-		__m256i v = _mm256_loadu_si256((const __m256i *)(st->timestamp + i));
+	for (; i + 8 <= sv->count && n + 8 <= max_out; i += 8) {
+		__m256i v = _mm256_loadu_si256((const __m256i *)(sv->timestamp + i));
 		__m256i b = _mm256_xor_si256(v, bias);
 		/* in range <=> !(b < lo) && !(b > hi) */
 		__m256i too_low  = _mm256_cmpgt_epi32(lo, b);
@@ -206,8 +207,8 @@ static size_t scan_timerange_avx2(const sigil_store_t *st,
 		}
 	}
 
-	for (; i < st->count && n < max_out; i++) {
-		uint32_t t = st->timestamp[i];
+	for (; i < sv->count && n < max_out; i++) {
+		uint32_t t = sv->timestamp[i];
 
 		if (t >= start && t <= end)
 			out[n++] = (uint32_t)i;
@@ -216,15 +217,16 @@ static size_t scan_timerange_avx2(const sigil_store_t *st,
 }
 
 __attribute__((target("avx2")))
-static size_t scan_category_avx2(const sigil_store_t *st, uint16_t category,
+static size_t scan_category_avx2(const sigil_view_t *sv, const void *arg,
                                 uint32_t *out, size_t max_out)
 {
+	uint16_t category = *(const uint16_t *)arg;
 	size_t n = 0, i = 0;
 	const __m256i q = _mm256_set1_epi16((short)category);
 
 	/* 16 categories per register. */
-	for (; i + 16 <= st->count && n + 16 <= max_out; i += 16) {
-		__m256i v  = _mm256_loadu_si256((const __m256i *)(st->category + i));
+	for (; i + 16 <= sv->count && n + 16 <= max_out; i += 16) {
+		__m256i v  = _mm256_loadu_si256((const __m256i *)(sv->category + i));
 		__m256i eq = _mm256_cmpeq_epi16(v, q);
 		/* movemask_epi8 gives two bits per 16-bit lane; both are set or
 		 * both clear, so test every other bit. */
@@ -237,8 +239,8 @@ static size_t scan_category_avx2(const sigil_store_t *st, uint16_t category,
 		}
 	}
 
-	for (; i < st->count && n < max_out; i++) {
-		if (st->category[i] == category)
+	for (; i < sv->count && n < max_out; i++) {
+		if (sv->category[i] == category)
 			out[n++] = (uint32_t)i;
 	}
 	return n;
@@ -281,18 +283,19 @@ now_ms(void)
 /* Best of several passes: a scheduler hiccup on one pass must not decide
  * which kernel this process uses for the rest of its life. */
 static double
-time_similar(size_t (*fn)(const sigil_store_t *, const uint64_t *, uint32_t,
-                          uint32_t *, size_t),
-             const sigil_store_t *st, const uint64_t *q, uint32_t *out,
-             size_t max_out)
+time_similar(sigil_scan_fn fn, const sigil_view_t *sv, const uint64_t *q,
+             uint32_t *out, size_t max_out)
 {
+	sigil_simarg_t a;
 	double best = 1e30;
 	int rep;
 
+	a.query = q;
+	a.max_distance = 64;
 	for (rep = 0; rep < 5; rep++) {
 		double t = now_ms();
 
-		fn(st, q, 64, out, max_out);
+		fn(sv, &a, out, max_out);
 		t = now_ms() - t;
 		if (t < best)
 			best = t;
@@ -304,6 +307,7 @@ static void
 calibrate(void)
 {
 	sigil_store_t st;
+	sigil_view_t sv;
 	uint64_t q[SIGIL_LSH_WORDS];
 	uint32_t *out;
 	uint64_t seed = 0x9e3779b97f4a7c15ULL;
@@ -345,11 +349,22 @@ calibrate(void)
 	for (i = 0; i < SIGIL_LSH_WORDS; i++)
 		q[i] = seed ^ (i + 1);
 
-	t_scalar = time_similar(sigil_scan_similar_scalar, &st, q, out, N);
+	/* Calibrate on the store's first segment: the kernels take a view,
+	 * and one segment is what any of them ever sees in a real scan. */
+	sv.lsh       = st.lsh[0];
+	sv.para      = st.para[0];
+	sv.cluster   = st.cluster[0];
+	sv.timestamp = st.timestamp[0];
+	sv.category  = st.category[0];
+	sv.trits     = st.trits[0];
+	sv.hash      = st.hash[0];
+	sv.count     = st.count;
+
+	t_scalar = time_similar(sigil_kernel_similar_scalar, &sv, q, out, N);
 	if (have_sse42())
-		t_sse = time_similar(sigil_scan_similar_sse, &st, q, out, N);
+		t_sse = time_similar(sigil_scan_similar_sse, &sv, q, out, N);
 	if (have_avx2())
-		t_avx2 = time_similar(scan_similar_avx2, &st, q, out, N);
+		t_avx2 = time_similar(scan_similar_avx2, &sv, q, out, N);
 
 	best = PathScalar;
 	if (t_sse < t_scalar)
@@ -434,46 +449,42 @@ int sigil_simd_chosen(void)
 	return path();
 }
 
-size_t sigil_scan_similar_simd(const sigil_store_t *st, const uint64_t *query,
-                               uint32_t max_distance,
-                               uint32_t *out, size_t max_out)
+size_t sigil_kernel_similar(const sigil_view_t *sv, const void *arg,
+                            uint32_t *out, size_t max_out)
 {
 	switch (path()) {
 	case PathAvx2:
-		return scan_similar_avx2(st, query, max_distance, out, max_out);
+		return scan_similar_avx2(sv, arg, out, max_out);
 	case PathSse:
-		return sigil_scan_similar_sse(st, query, max_distance, out,
-		                              max_out);
+		return sigil_scan_similar_sse(sv, arg, out, max_out);
 	default:
-		return sigil_scan_similar_scalar(st, query, max_distance, out,
-		                                 max_out);
+		return sigil_kernel_similar_scalar(sv, arg, out, max_out);
 	}
 }
 
-size_t sigil_scan_timerange_simd(const sigil_store_t *st,
-                                 uint32_t start, uint32_t end,
-                                 uint32_t *out, size_t max_out)
+size_t sigil_kernel_timerange(const sigil_view_t *sv, const void *arg,
+                              uint32_t *out, size_t max_out)
 {
 	switch (path()) {
 	case PathAvx2:
-		return scan_timerange_avx2(st, start, end, out, max_out);
+		return scan_timerange_avx2(sv, arg, out, max_out);
 	case PathSse:
-		return sigil_scan_timerange_sse(st, start, end, out, max_out);
+		return sigil_scan_timerange_sse(sv, arg, out, max_out);
 	default:
-		return sigil_scan_timerange_scalar(st, start, end, out, max_out);
+		return sigil_kernel_timerange_scalar(sv, arg, out, max_out);
 	}
 }
 
-size_t sigil_scan_category_simd(const sigil_store_t *st, uint16_t category,
-                                uint32_t *out, size_t max_out)
+size_t sigil_kernel_category(const sigil_view_t *sv, const void *arg,
+                             uint32_t *out, size_t max_out)
 {
 	switch (path()) {
 	case PathAvx2:
-		return scan_category_avx2(st, category, out, max_out);
+		return scan_category_avx2(sv, arg, out, max_out);
 	case PathSse:
-		return sigil_scan_category_sse(st, category, out, max_out);
+		return sigil_scan_category_sse(sv, arg, out, max_out);
 	default:
-		return sigil_scan_category_scalar(st, category, out, max_out);
+		return sigil_kernel_category_scalar(sv, arg, out, max_out);
 	}
 }
 
