@@ -337,6 +337,41 @@ typedef struct {
 	size_t maplen;
 } sigil_side_t;
 
+/* ---------------------------------------------------------------------------
+ * Building a float sidecar
+ *
+ * Vectors arrive one embedding batch at a time and there can be tens of
+ * millions of them: the corpus at dim 384 is 85 GB of float32, which does
+ * not fit in memory. So the builder grows the same way the store does --
+ * fixed segments, appended, never copied -- and writes them out segment by
+ * segment.
+ *
+ * An earlier version accumulated into one realloc'd array and wrote at the
+ * end. That is the same materialise-then-process shape that made
+ * store_commit need 54 GB to write 12 GB, and it would have died about six
+ * hours into a seven-hour run.
+ * ------------------------------------------------------------------------ */
+
+typedef struct {
+	float  **seg;        /* [nseg][SIGIL_SEG_RECS * dim] */
+	uint32_t **idx;      /* [nseg][SIGIL_SEG_RECS] store indices */
+	size_t   nseg, segcap;
+	size_t   count;
+	size_t   dim;
+} sigil_sidebuild_t;
+
+int  sigil_sidebuild_init(sigil_sidebuild_t *sb, size_t dim);
+void sigil_sidebuild_free(sigil_sidebuild_t *sb);
+
+/* Append one vector for store index i. Returns 0, or -1 on allocation
+ * failure -- which costs one segment, not the run. */
+int  sigil_sidebuild_add(sigil_sidebuild_t *sb, uint32_t i, const float *v);
+
+/* Write the accumulated vectors as a sidecar, streaming segment by segment
+ * so no copy of the whole set is ever made. */
+int  sigil_sidebuild_save(const sigil_sidebuild_t *sb, const char *path,
+                          const char *model, uint64_t base_count);
+
 /* Write a code sidecar. `index` must be ascending; `code` is count*words. */
 int sigil_side_save(const char *path, const uint32_t *index,
                     const uint64_t *code, size_t count, size_t words,

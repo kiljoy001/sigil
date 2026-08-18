@@ -68,6 +68,13 @@ struct builder {
 	/* counters */
 	size_t rows, stored, skipped_short, skipped_empty;
 	float *vecs;
+
+	/* Stage-two sidecar, accumulated during the same pass. The vectors
+	 * are already in hand when the codes are projected from them;
+	 * re-embedding the corpus later to recover them would cost the whole
+	 * run again. */
+	int      want_side;
+	sigil_sidebuild_t side;
 };
 
 static double now_s(void)
@@ -76,6 +83,26 @@ static double now_s(void)
 
 	clock_gettime(CLOCK_MONOTONIC, &t);
 	return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
+}
+
+/*
+ * Remember one vector for the sidecar. The index recorded is the record
+ * this vector is about to become, so the two stay aligned even though the
+ * store is appended to separately.
+ */
+static void
+keep_vec(struct builder *b, const float *v)
+{
+	/* Segmented, like the store: the corpus is 85 GB of float32 at dim
+	 * 384, so accumulating into one array and writing at the end is the
+	 * same materialise-then-process failure that made store_commit need
+	 * 54 GB to write 12 GB. */
+	if (sigil_sidebuild_add(&b->side, (uint32_t)b->stored, v) != 0) {
+		fprintf(stderr, "sidecar segment allocation failed at %zu "
+		                "vectors; aborting rather than writing a "
+		                "partial one\n", b->side.count);
+		exit(1);
+	}
 }
 
 /* Push one record, with bits already decided. */
@@ -128,6 +155,8 @@ flush(struct builder *b)
 				sigil_simhash_project(&b->sh,
 				                      b->vecs + i * b->dim,
 				                      code);
+				if (b->want_side)
+					keep_vec(b, b->vecs + i * b->dim);
 				emit(b, b->btext[i], b->blen[i], b->bpara[i],
 				     b->bts[i], code);
 			}
@@ -229,6 +258,7 @@ main(int argc, char **argv)
 	struct csv_parser cp;
 	const char *in_path = NULL, *out_path = NULL, *model = NULL;
 	const char *device = "GPU.1";
+	int side = 0;
 	size_t limit = 0;
 	char buf[1 << 20];
 	FILE *in;
@@ -239,6 +269,8 @@ main(int argc, char **argv)
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "-e") && i + 1 < argc)
 			model = argv[++i];
+		else if (!strcmp(argv[i], "-s"))
+			side = 1;
 		else if (!strcmp(argv[i], "-d") && i + 1 < argc)
 			device = argv[++i];
 		else if (!strcmp(argv[i], "-n") && i + 1 < argc)
@@ -251,7 +283,7 @@ main(int argc, char **argv)
 	if (in_path == NULL || out_path == NULL) {
 		fprintf(stderr,
 		        "usage: build_store <corpus.csv> <out.smap> "
-		        "[-e model.gguf|ov-dir] [-d DEVICE] [-n limit]\n");
+		        "[-e model.gguf|ov-dir] [-d DEVICE] [-s] [-n limit]\n");
 		return 2;
 	}
 
@@ -285,6 +317,11 @@ main(int argc, char **argv)
 			return 1;
 		}
 		b.have_emb = 1;
+		b.want_side = side;
+		if (side && sigil_sidebuild_init(&b.side, b.dim) != 0) {
+			fprintf(stderr, "sidecar init failed\n");
+			return 1;
+		}
 		b.vecs = malloc(BATCH * b.dim * sizeof *b.vecs);
 		fprintf(stderr, "embedder: %s (dim %zu)\n",
 		        b.emb->name(b.emb), b.dim);
@@ -351,6 +388,20 @@ main(int argc, char **argv)
 		return 1;
 	}
 	fprintf(stderr, "wrote           %s\n", out_path);
+
+	if (b.want_side && b.side.count) {
+		char *sp = malloc(strlen(out_path) + 8);
+
+		sprintf(sp, "%s.side", out_path);
+		if (sigil_sidebuild_save(&b.side, sp, b.emb->name(b.emb),
+		                         (uint64_t)b.st.count) != 0)
+			perror("sidecar");
+		else
+			fprintf(stderr, "wrote           %s (%zu vectors, "
+			                "dim %zu)\n", sp, b.side.count, b.dim);
+		free(sp);
+		sigil_sidebuild_free(&b.side);
+	}
 
 	sigil_store_free(&b.st);
 	return 0;

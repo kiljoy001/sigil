@@ -401,3 +401,163 @@ uint32_t sigil_side_hamming(const sigil_side_t *sd, const uint64_t *a,
 		d += (uint32_t)__builtin_popcountll(a[w] ^ b[w]);
 	return d;
 }
+
+/* ---------------------------------------------------------------------------
+ * Segmented accumulation
+ *
+ * Same structure as the store, for the same reason: the vectors do not fit.
+ * A segment is allocated once and never moves, so growth appends and the
+ * save streams -- at no point does a second copy of the set exist.
+ * ------------------------------------------------------------------------ */
+
+int sigil_sidebuild_init(sigil_sidebuild_t *sb, size_t dim)
+{
+	memset(sb, 0, sizeof *sb);
+	if (dim == 0 || dim > 65536)
+		return -1;
+	sb->dim = dim;
+	return 0;
+}
+
+void sigil_sidebuild_free(sigil_sidebuild_t *sb)
+{
+	size_t g;
+
+	for (g = 0; g < sb->nseg; g++) {
+		free(sb->seg[g]);
+		free(sb->idx[g]);
+	}
+	free(sb->seg);
+	free(sb->idx);
+	memset(sb, 0, sizeof *sb);
+}
+
+/* Append one segment to both arrays. Both must succeed together: a vector
+ * segment without its index segment would write past the end of the shorter
+ * one on the next add. */
+static int sidebuild_grow(sigil_sidebuild_t *sb)
+{
+	float *v = NULL;
+	uint32_t *ix = NULL;
+
+	if (sb->nseg == sb->segcap) {
+		size_t nc = sb->segcap ? sb->segcap * 2 : 16;
+		float **ns = realloc(sb->seg, nc * sizeof *ns);
+		uint32_t **ni;
+
+		if (ns == NULL)
+			return -1;
+		sb->seg = ns;
+		ni = realloc(sb->idx, nc * sizeof *ni);
+		if (ni == NULL)
+			return -1;
+		sb->idx = ni;
+		sb->segcap = nc;
+	}
+
+	v  = malloc(SIGIL_SEG_RECS * sb->dim * sizeof *v);
+	ix = malloc(SIGIL_SEG_RECS * sizeof *ix);
+	if (v == NULL || ix == NULL) {
+		free(v);
+		free(ix);
+		return -1;
+	}
+	sb->seg[sb->nseg] = v;
+	sb->idx[sb->nseg] = ix;
+	sb->nseg++;
+	return 0;
+}
+
+int sigil_sidebuild_add(sigil_sidebuild_t *sb, uint32_t i, const float *v)
+{
+	size_t g, o;
+
+	if (sb->count == sb->nseg * SIGIL_SEG_RECS
+	    && sidebuild_grow(sb) != 0)
+		return -1;
+
+	g = sb->count >> SIGIL_SEG_SHIFT;
+	o = sb->count & SIGIL_SEG_MASK;
+	sb->idx[g][o] = i;
+	memcpy(sb->seg[g] + o * sb->dim, v, sb->dim * sizeof *v);
+	sb->count++;
+	return 0;
+}
+
+int sigil_sidebuild_save(const sigil_sidebuild_t *sb, const char *path,
+                         const char *model, uint64_t base_count)
+{
+	sigil_side_header h;
+	char *tmp;
+	int fd, rc = -1;
+	size_t g, elem = sb->dim * sizeof(float);
+
+	tmp = malloc(strlen(path) + 8);
+	if (tmp == NULL)
+		return -1;
+	sprintf(tmp, "%s.tmp", path);
+
+	fd = open(tmp, O_RDWR | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0) {
+		free(tmp);
+		return -1;
+	}
+
+	memset(&h, 0, sizeof h);
+	h.magic      = SIGIL_SIDE_MAGIC;
+	h.version    = SIGIL_SIDE_VERSION;
+	h.kind       = (uint32_t)SIGIL_SIDE_FLOAT;
+	h.dim        = (uint32_t)sb->dim;
+	h.count      = sb->count;
+	h.base_count = base_count;
+	h.index_off  = page_round(sizeof h);
+	h.code_off   = h.index_off + page_round(sb->count * sizeof(uint32_t));
+	if (model != NULL)
+		snprintf(h.model, sizeof h.model, "%s", model);
+
+	if (write(fd, &h, sizeof h) != (ssize_t)sizeof h)
+		goto out;
+
+	/* Indices, then vectors, one segment at a time. Nothing here holds
+	 * more than one segment beyond what the caller already had. */
+	if (lseek(fd, (off_t)h.index_off, SEEK_SET) < 0)
+		goto out;
+	for (g = 0; g < sb->nseg; g++) {
+		size_t have = (g + 1) * SIGIL_SEG_RECS <= sb->count
+		            ? SIGIL_SEG_RECS : sb->count - g * SIGIL_SEG_RECS;
+
+		if (write(fd, sb->idx[g], have * sizeof(uint32_t))
+		    != (ssize_t)(have * sizeof(uint32_t)))
+			goto out;
+	}
+	if (lseek(fd, (off_t)h.code_off, SEEK_SET) < 0)
+		goto out;
+	for (g = 0; g < sb->nseg; g++) {
+		size_t have = (g + 1) * SIGIL_SEG_RECS <= sb->count
+		            ? SIGIL_SEG_RECS : sb->count - g * SIGIL_SEG_RECS;
+
+		if (write(fd, sb->seg[g], have * elem) != (ssize_t)(have * elem))
+			goto out;
+	}
+
+	if (ftruncate(fd, (off_t)(h.code_off
+	                          + page_round(sb->count * elem))) != 0)
+		goto out;
+	if (fsync(fd) != 0)
+		goto out;
+	if (close(fd) != 0) {
+		fd = -1;
+		goto out;
+	}
+	fd = -1;
+	if (rename(tmp, path) != 0)
+		goto out;
+	rc = 0;
+out:
+	if (fd >= 0)
+		close(fd);
+	if (rc != 0)
+		unlink(tmp);
+	free(tmp);
+	return rc;
+}
